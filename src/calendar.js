@@ -391,9 +391,22 @@ function makeGame(definition, iso, id) {
   };
 }
 
+function slugify(value) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
 function createHoliday(definition, date, scope, regionLabel) {
   const iso = isoDate(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
-  const id = scope === 'national' ? definition.id : `${definition.id}-${scope === 'regional' ? 'regional' : 'national'}`;
+  // Las fechas autonómicas no siempre tienen `id`; derivarlo evita claves
+  // duplicadas en React y semillas de trivial repetidas entre festivos.
+  const id = scope === 'national'
+    ? definition.id
+    : `${slugify(regionLabel)}-${definition.id ?? slugify(definition.name)}`;
   return {
     ...definition,
     id,

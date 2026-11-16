@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
+  // Assets relativos: el sitio funciona tanto en la raíz como en el subpath
+  // de GitHub Pages (/Calendario-Festivo-Espa-a/).
+  base: './',
   plugins: [react()],
   server: {
     host: '0.0.0.0',

@@ -50,6 +50,17 @@ test('todos los festivos tienen un minijuego y fechas ISO válidas', () => {
   }
 });
 
+test('todos los festivos tienen identificadores únicos y válidos', () => {
+  for (const region of REGIONS) {
+    for (const year of [2025, 2026, 2027]) {
+      const holidays = getHolidays(year, region.id);
+      const ids = holidays.map((holiday) => holiday.id);
+      assert.ok(ids.every((id) => id && !id.includes('undefined')), `${region.label} ${year} tiene un id inválido`);
+      assert.equal(new Set(ids).size, ids.length, `${region.label} ${year} tiene ids duplicados`);
+    }
+  }
+});
+
 test('el calendario empieza en lunes y completa las semanas del mes', () => {
   const november = getMonthCells(2026, 10);
   assert.equal(november.length, 42);
