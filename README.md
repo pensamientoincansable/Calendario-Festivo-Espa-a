@@ -1,6 +1,6 @@
 # Festeja · Calendario festivo de España
 
-Una guía interactiva de festivos nacionales y fechas autonómicas de referencia. Explora el calendario por mes, año y territorio; al abrir un día festivo encontrarás una tradición y un minijuego temático (memoria, orden o trivia).
+Una guía interactiva de festivos nacionales, grandes celebraciones y fechas autonómicas de España. Explora el calendario por mes, año y territorio; al abrir cada fecha encontrarás su tradición y un minijuego interactivo diseñado a medida (carreras arcade, el trineo de Papá Noel, la cabalgata de los Reyes Magos, cocina de recetas españolas, match-3 de dulces de Halloween, las doce uvas, pirotecnia, castells, luminarias y más).
 
 ## Desarrollo
 
