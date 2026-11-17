@@ -2,8 +2,18 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f8f5ee" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f4ed" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Aplicar el aspecto antes del primer dibujo evita el destello claro al abrir de noche.
+      var storedTheme;
+      try { storedTheme = localStorage.getItem('festeja:theme'); } catch (_) {}
+      var theme = storedTheme === 'dark' || storedTheme === 'light' ? storedTheme : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#131e19' : '#f7f4ed';
+    </script>
     <meta name="description" content="Calendario interactivo de festivos nacionales, celebraciones populares y fiestas autonómicas de España, cada una con su propio minijuego interactivo." />
     <title>Festeja · Calendario festivo de España</title>
   </head>

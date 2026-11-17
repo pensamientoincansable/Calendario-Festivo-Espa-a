@@ -9,6 +9,7 @@ import '@fontsource/playfair-display/latin-500.css';
 import '@fontsource/playfair-display/latin-600.css';
 import '@fontsource/playfair-display/latin-500-italic.css';
 import './styles.css';
+import './experience.css';
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>

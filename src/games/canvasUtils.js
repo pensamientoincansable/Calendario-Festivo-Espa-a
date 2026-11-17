@@ -3,23 +3,48 @@ export function clamp(value, min, max) {
 }
 
 export function isModalChromeTarget(event) {
+  if (event?.defaultPrevented || event?.ctrlKey || event?.metaKey || event?.altKey) return true;
   const target = event?.target;
-  if (!(target instanceof HTMLElement)) return false;
-  return Boolean(target.closest('.game-top-actions, .game-stats-line'));
+  if (typeof Element === 'undefined' || !(target instanceof Element)) return false;
+  if (target.closest('[data-game-chrome], .game-top-actions, .game-stats-line, [inert], input, select, textarea, [contenteditable="true"]')) return true;
+  // Espacio/Intro activan el botón enfocado de forma nativa, no dos acciones.
+  return ['Space', 'Enter'].includes(event.code) && Boolean(target.closest('button, a[href]'));
+}
+
+const canvasMetrics = new WeakMap();
+
+// ResizeObserver mide solo al cambiar el tamaño, nunca en cada fotograma.
+export function observeCanvasSize(canvas) {
+  const metrics = { width: canvas.clientWidth, height: canvas.clientHeight, ctx: null };
+  canvasMetrics.set(canvas, metrics);
+  const observer = new ResizeObserver(([entry]) => {
+    metrics.width = entry.contentRect.width;
+    metrics.height = entry.contentRect.height;
+  });
+  observer.observe(canvas);
+  return () => {
+    observer.disconnect();
+    canvasMetrics.delete(canvas);
+  };
 }
 
 export function setupHiDPICanvas(canvas, width, height) {
   if (!canvas || width <= 0 || height <= 0) return null;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const targetW = Math.round(width * dpr);
-  const targetH = Math.round(height * dpr);
+  const metrics = canvasMetrics.get(canvas);
+  const cssW = metrics?.width || width;
+  const cssH = metrics?.height || height;
+  // Nitidez a pantalla completa sin crear buffers enormes en móviles de alta densidad.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(2500000 / (cssW * cssH)));
+  const targetW = Math.max(1, Math.round(cssW * dpr));
+  const targetH = Math.max(1, Math.round(cssH * dpr));
   if (canvas.width !== targetW || canvas.height !== targetH) {
     canvas.width = targetW;
     canvas.height = targetH;
   }
-  const ctx = canvas.getContext('2d');
+  const ctx = metrics?.ctx || canvas.getContext('2d', { alpha: false });
   if (!ctx) return null;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (metrics) metrics.ctx = ctx;
+  ctx.setTransform(targetW / width, 0, 0, targetH / height, 0, 0);
   return ctx;
 }
 

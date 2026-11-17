@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { capturePointer } from './inputUtils.js';
+import { useGameClock, HoldButton, ActionButton, useGridNavigation } from './GameSession.jsx';
 import {
   ArrowUp,
   Bell,
@@ -25,11 +27,13 @@ import { sfx } from '../sound.js';
 
 const W = 500;
 const H = 300;
+const DEFAULT_GOOD_ICONS = ['🌰', '🍬', '🥨'];
 
 /* =========================================================================
    1. LAS DOCE UVAS · Reloj de la Puerta del Sol (Ritmo y reflejos)
    ========================================================================= */
 export function ChimesGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const totalChimes = 12;
   const canvasRef = useRef(null);
   const [started, setStarted] = useState(false);
@@ -47,13 +51,15 @@ export function ChimesGame({ game, onProgress, onComplete }) {
     flash: 0,
   });
   const doneRef = useRef(false);
+  const lastGrapeRef = useRef(-Infinity);
   const endTimerRef = useRef(0);
 
-  useEffect(() => () => window.clearTimeout(endTimerRef.current), []);
+  useEffect(() => () => clock.clearTimeout(endTimerRef.current), [clock]);
 
   const reset = useCallback(() => {
-    window.clearTimeout(endTimerRef.current);
+    clock.clearTimeout(endTimerRef.current);
     doneRef.current = false;
+    lastGrapeRef.current = -Infinity;
     stateRef.current = {
       phase: 0.12,
       dir: 1,
@@ -68,13 +74,15 @@ export function ChimesGame({ game, onProgress, onComplete }) {
     setStatusText('¡Empiezan las campanadas! Come una uva en cada toque de campana.');
     onProgress?.(0);
     setStarted(true);
-  }, [onProgress]);
+  }, [clock, onProgress]);
 
   const eatGrape = useCallback(() => {
     if (!started) {
       reset();
       return;
     }
+    if (clock.now() - lastGrapeRef.current < 150) return;
+    lastGrapeRef.current = clock.now();
     const s = stateRef.current;
     if (doneRef.current || s.chimeIndex >= totalChimes) return;
 
@@ -117,8 +125,8 @@ export function ChimesGame({ game, onProgress, onComplete }) {
       const perfects = s.results.filter((r) => r === 'perfect').length;
       const won = eaten >= 8;
       const stars = eaten === 12 && perfects >= 7 ? 3 : eaten >= 10 ? 2 : eaten >= 7 ? 1 : 0;
-      window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => {
+      clock.clearTimeout(endTimerRef.current);
+      endTimerRef.current = clock.setTimeout(() => {
         if (won) sfx.win();
         else sfx.end();
         onComplete({
@@ -133,11 +141,11 @@ export function ChimesGame({ game, onProgress, onComplete }) {
         });
       }, 420);
     }
-  }, [onComplete, onProgress, reset, started]);
+  }, [clock, onComplete, onProgress, reset, started]);
 
   useEffect(() => {
     function onKey(e) {
-      if (e.repeat || isModalChromeTarget(e)) return;
+      if (e.repeat || clock.isPaused() || isModalChromeTarget(e)) return;
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         eatGrape();
@@ -145,13 +153,13 @@ export function ChimesGame({ game, onProgress, onComplete }) {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [eatGrape]);
+  }, [clock, eatGrape]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
 
     const loop = (now) => {
       const dt = Math.min(0.045, (now - last) / 1000);
@@ -261,12 +269,12 @@ export function ChimesGame({ game, onProgress, onComplete }) {
       updateAndDrawParticles(ctx, s.particles, dt, 110);
       updateAndDrawPopups(ctx, s.popups, dt);
 
-      rafId = window.requestAnimationFrame(loop);
+      if (started) rafId = clock.requestFrame(loop);
     };
 
-    rafId = window.requestAnimationFrame(loop);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [started]);
+    rafId = clock.requestFrame(loop);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, started]);
 
   const eatenCount = grapes.filter((g) => g === 'perfect' || g === 'good').length;
 
@@ -298,9 +306,9 @@ export function ChimesGame({ game, onProgress, onComplete }) {
         ))}
       </div>
 
-      <button type="button" className="game-primary-button full-action-btn" onClick={eatGrape}>
+      <ActionButton type="button" className="game-primary-button full-action-btn" onAction={eatGrape}>
         <Bell size={16} /> ¡Tomar uva #{Math.min(12, grapes.filter((g) => g !== 'pending').length + 1)}!
-      </button>
+      </ActionButton>
       <p className="game-hint"><span className="hint-sparkle">✦</span> {statusText}</p>
     </div>
   );
@@ -329,6 +337,7 @@ const RUNNER_THEMES = {
 };
 
 export function RunnerGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const theme = RUNNER_THEMES[game.scene ?? 'bonfire'] ?? RUNNER_THEMES.bonfire;
   const goal = game.goal ?? 12;
   const GROUND_Y = 242;
@@ -343,6 +352,7 @@ export function RunnerGame({ game, onProgress, onComplete }) {
     y: GROUND_Y,
     vy: 0,
     jumps: 0,
+    jumpBuffer: 0,
     cleared: 0,
     tokens: 0,
     score: 0,
@@ -356,20 +366,22 @@ export function RunnerGame({ game, onProgress, onComplete }) {
     popups: [],
   }), [GROUND_Y]);
 
-  useEffect(() => { stateRef.current = init(); }, [init]);
+  useEffect(() => { stateRef.current = init(); }, [clock, init]);
 
   const jump = useCallback(() => {
     if (!started) {
       setStarted(true);
-      return;
     }
     const s = stateRef.current;
     if (!s || doneRef.current) return;
     if (s.jumps < 2) {
       s.vy = s.jumps === 0 ? -435 : -375;
       s.jumps += 1;
+      s.jumpBuffer = 0;
       sfx.jump();
       spawnParticles(s.particles, 96, s.y, ['#ffe066', '#ffffff'], 8, 90);
+    } else {
+      s.jumpBuffer = 0.12;
     }
   }, [started]);
 
@@ -383,7 +395,7 @@ export function RunnerGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     function onKey(e) {
-      if (e.repeat || isModalChromeTarget(e)) return;
+      if (e.repeat || clock.isPaused() || isModalChromeTarget(e)) return;
       if (['Space', 'ArrowUp', 'KeyW', 'Enter'].includes(e.code)) {
         e.preventDefault();
         jump();
@@ -391,13 +403,13 @@ export function RunnerGame({ game, onProgress, onComplete }) {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [jump]);
+  }, [clock, jump]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
 
     const tick = (now) => {
       const dt = Math.min(0.045, (now - last) / 1000);
@@ -408,6 +420,7 @@ export function RunnerGame({ game, onProgress, onComplete }) {
         s.time += dt;
         if (s.invuln > 0) s.invuln = Math.max(0, s.invuln - dt);
 
+        s.jumpBuffer = Math.max(0, s.jumpBuffer - dt);
         // Gravedad y aterrizaje
         s.vy += 1080 * dt;
         s.y += s.vy * dt;
@@ -415,6 +428,12 @@ export function RunnerGame({ game, onProgress, onComplete }) {
           s.y = GROUND_Y;
           s.vy = 0;
           s.jumps = 0;
+          if (s.jumpBuffer > 0) {
+            s.vy = -435;
+            s.jumps = 1;
+            s.jumpBuffer = 0;
+            sfx.jump();
+          }
         }
 
         const speed = 225 + s.cleared * 8;
@@ -578,12 +597,12 @@ export function RunnerGame({ game, onProgress, onComplete }) {
         }
       }
 
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [GROUND_Y, game.scene, goal, onComplete, onProgress, started, theme]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, GROUND_Y, game.scene, goal, onComplete, onProgress, started, theme]);
 
   return (
     <div className="arcade-wrap">
@@ -606,9 +625,9 @@ export function RunnerGame({ game, onProgress, onComplete }) {
         )}
       </div>
 
-      <button type="button" className="game-primary-button full-action-btn" onPointerDown={jump}>
+      <ActionButton type="button" className="game-primary-button full-action-btn" onAction={jump}>
         <ArrowUp size={16} /> Saltar (doble salto activo)
-      </button>
+      </ActionButton>
     </div>
   );
 }
@@ -624,17 +643,20 @@ const STACK_PALETTES = {
 };
 
 export function StackerGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const goalFloors = game.goal ?? 10;
   const colors = STACK_PALETTES[game.style ?? 'guild'] ?? STACK_PALETTES.guild;
   const crownIcon = game.crownIcon ?? '🏁';
   const BLOCK_H = 22;
 
   const canvasRef = useRef(null);
+  const [started, setStarted] = useState(false);
+  const lastDropRef = useRef(-Infinity);
   const [hud, setHud] = useState({ floors: 0, perfects: 0, score: 0 });
   const doneRef = useRef(false);
   const endTimerRef = useRef(0);
 
-  useEffect(() => () => window.clearTimeout(endTimerRef.current), []);
+  useEffect(() => () => clock.clearTimeout(endTimerRef.current), [clock]);
 
   const makeInitial = useCallback(() => ({
     stack: [{ x: W / 2 - 90, w: 180, color: '#344e41' }],
@@ -647,17 +669,22 @@ export function StackerGame({ game, onProgress, onComplete }) {
   }), [colors]);
 
   const stateRef = useRef(null);
-  useEffect(() => { stateRef.current = makeInitial(); }, [makeInitial]);
+  useEffect(() => { stateRef.current = makeInitial(); }, [clock, makeInitial]);
 
   const reset = useCallback(() => {
-    window.clearTimeout(endTimerRef.current);
+    clock.clearTimeout(endTimerRef.current);
     doneRef.current = false;
+    lastDropRef.current = -Infinity;
+    setStarted(true);
     stateRef.current = makeInitial();
     setHud({ floors: 0, perfects: 0, score: 0 });
     onProgress?.(0);
-  }, [makeInitial, onProgress]);
+  }, [clock, makeInitial, onProgress]);
 
   const dropBlock = useCallback(() => {
+    if (!started) { setStarted(true); return; }
+    if (clock.now() - lastDropRef.current < 150) return;
+    lastDropRef.current = clock.now();
     const s = stateRef.current;
     if (!s || doneRef.current || !s.active) return;
 
@@ -676,8 +703,8 @@ export function StackerGame({ game, onProgress, onComplete }) {
       doneRef.current = true;
       const built = s.stack.length - 1;
       sfx.end();
-      window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => {
+      clock.clearTimeout(endTimerRef.current);
+      endTimerRef.current = clock.setTimeout(() => {
         onComplete({
           won: false,
           score: s.score,
@@ -721,8 +748,8 @@ export function StackerGame({ game, onProgress, onComplete }) {
       doneRef.current = true;
       const stars = s.perfects >= 4 ? 3 : s.perfects >= 1 || placedW >= 80 ? 2 : 1;
       sfx.win();
-      window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => {
+      clock.clearTimeout(endTimerRef.current);
+      endTimerRef.current = clock.setTimeout(() => {
         onComplete({
           won: true,
           score: s.score + Math.round(placedW * 2),
@@ -743,11 +770,11 @@ export function StackerGame({ game, onProgress, onComplete }) {
       speed: 175 + floors * 18,
       color: nextColor,
     };
-  }, [BLOCK_H, colors, goalFloors, onComplete, onProgress]);
+  }, [clock, BLOCK_H, colors, goalFloors, onComplete, onProgress, started]);
 
   useEffect(() => {
     function onKey(e) {
-      if (e.repeat || isModalChromeTarget(e)) return;
+      if (e.repeat || clock.isPaused() || isModalChromeTarget(e)) return;
       if (e.code === 'Space' || e.code === 'Enter' || e.code === 'ArrowDown') {
         e.preventDefault();
         dropBlock();
@@ -755,13 +782,13 @@ export function StackerGame({ game, onProgress, onComplete }) {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [dropBlock]);
+  }, [clock, dropBlock]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
 
     const tick = (now) => {
       const dt = Math.min(0.045, (now - last) / 1000);
@@ -769,7 +796,7 @@ export function StackerGame({ game, onProgress, onComplete }) {
       const s = stateRef.current;
 
       if (s) {
-        if (s.active && !doneRef.current) {
+        if (started && s.active && !doneRef.current) {
           s.active.x += s.active.dir * s.active.speed * dt;
           if (s.active.x + s.active.w >= W - 24) {
             s.active.x = W - 24 - s.active.w;
@@ -838,12 +865,12 @@ export function StackerGame({ game, onProgress, onComplete }) {
         updateAndDrawPopups(ctx, s.popups, dt);
       }
 
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [BLOCK_H, crownIcon, goalFloors]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, BLOCK_H, crownIcon, goalFloors, started]);
 
   return (
     <div className="arcade-wrap">
@@ -855,10 +882,16 @@ export function StackerGame({ game, onProgress, onComplete }) {
       </div>
       <div className="canvas-frame">
         <canvas ref={canvasRef} className="game-canvas" onPointerDown={dropBlock} aria-label={game.title} />
+        {!started && (
+          <div className="canvas-overlay">
+            <button type="button" className="canvas-start-btn" onClick={() => setStarted(true)}><Play size={16} /> Empezar a construir</button>
+            <span>Alinea la pieza con la base y pulsa Espacio o toca para colocarla</span>
+          </div>
+        )}
       </div>
-      <button type="button" className="game-primary-button full-action-btn" onClick={dropBlock}>
+      <ActionButton type="button" className="game-primary-button full-action-btn" onAction={dropBlock}>
         <Layers size={16} /> Colocar pieza (Espacio o clic)
-      </button>
+      </ActionButton>
     </div>
   );
 }
@@ -874,6 +907,7 @@ const FIREWORK_PALETTES = [
 ];
 
 export function FireworksGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const goalBursts = game.goal ?? 14;
   const canvasRef = useRef(null);
   const [started, setStarted] = useState(false);
@@ -882,7 +916,7 @@ export function FireworksGame({ game, onProgress, onComplete }) {
   const doneRef = useRef(false);
   const endTimerRef = useRef(0);
 
-  useEffect(() => () => window.clearTimeout(endTimerRef.current), []);
+  useEffect(() => () => clock.clearTimeout(endTimerRef.current), [clock]);
 
   const init = useCallback(() => ({
     rockets: [],
@@ -896,16 +930,16 @@ export function FireworksGame({ game, onProgress, onComplete }) {
     skyGlow: 0,
   }), []);
 
-  useEffect(() => { stateRef.current = init(); }, [init]);
+  useEffect(() => { stateRef.current = init(); }, [clock, init]);
 
   const reset = useCallback(() => {
-    window.clearTimeout(endTimerRef.current);
+    clock.clearTimeout(endTimerRef.current);
     doneRef.current = false;
     stateRef.current = init();
     setHud({ bursts: 0, combo: 0, score: 0, timeLeft: 36 });
     onProgress?.(0);
     setStarted(true);
-  }, [init, onProgress]);
+  }, [clock, init, onProgress]);
 
   const triggerBurst = useCallback((rocket) => {
     const s = stateRef.current;
@@ -932,8 +966,8 @@ export function FireworksGame({ game, onProgress, onComplete }) {
       doneRef.current = true;
       setHud({ bursts: s.bursts, combo: s.combo, score: s.score, timeLeft: Math.ceil(s.timeLeft) });
       const stars = s.timeLeft >= 11 ? 3 : s.timeLeft >= 4 ? 2 : 1;
-      window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => {
+      clock.clearTimeout(endTimerRef.current);
+      endTimerRef.current = clock.setTimeout(() => {
         sfx.win();
         onComplete({
           won: true,
@@ -945,7 +979,7 @@ export function FireworksGame({ game, onProgress, onComplete }) {
         });
       }, 450);
     }
-  }, [goalBursts, onComplete, onProgress]);
+  }, [clock, goalBursts, onComplete, onProgress]);
 
   const handleCanvasDown = useCallback((e) => {
     if (!started) {
@@ -995,7 +1029,7 @@ export function FireworksGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     function onKey(e) {
-      if (e.repeat || isModalChromeTarget(e)) return;
+      if (e.repeat || clock.isPaused() || isModalChromeTarget(e)) return;
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         detonateBest();
@@ -1003,13 +1037,13 @@ export function FireworksGame({ game, onProgress, onComplete }) {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [detonateBest]);
+  }, [clock, detonateBest]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
     let hudAcc = 0;
 
     const tick = (now) => {
@@ -1037,7 +1071,7 @@ export function FireworksGame({ game, onProgress, onComplete }) {
         for (let i = s.rockets.length - 1; i >= 0; i -= 1) {
           const rk = s.rockets[i];
           rk.y -= rk.vy * dt;
-          if (Math.random() < 0.6) {
+          if (Math.random() < 1 - Math.exp(-55 * dt)) {
             s.particles.push({
               x: rk.x + (Math.random() - 0.5) * 3,
               y: rk.y + 8,
@@ -1123,12 +1157,12 @@ export function FireworksGame({ game, onProgress, onComplete }) {
         ctx.fill();
       }
 
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [goalBursts, onComplete, started]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, goalBursts, onComplete, started]);
 
   return (
     <div className="arcade-wrap">
@@ -1150,9 +1184,9 @@ export function FireworksGame({ game, onProgress, onComplete }) {
           </div>
         )}
       </div>
-      <button type="button" className="game-primary-button full-action-btn" onClick={detonateBest}>
+      <ActionButton type="button" className="game-primary-button full-action-btn" onAction={detonateBest}>
         <Sparkles size={16} /> ¡Estallar cohete en el cielo!
-      </button>
+      </ActionButton>
     </div>
   );
 }
@@ -1161,8 +1195,9 @@ export function FireworksGame({ game, onProgress, onComplete }) {
    5. CESTA FESTIVA · Atrapa-tesoros arcade (Castañera, Sidra, Dehesa)
    ========================================================================= */
 export function CatcherGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const goalCount = game.goal ?? 15;
-  const goodIcons = game.goodIcons ?? ['🌰', '🍬', '🥨'];
+  const goodIcons = game.goodIcons ?? DEFAULT_GOOD_ICONS;
   const goldIcon = game.goldIcon ?? '🌟';
   const badIcon = game.badIcon ?? '🌵';
   const vesselLabel = game.vesselLabel ?? 'CESTA';
@@ -1183,6 +1218,7 @@ export function CatcherGame({ game, onProgress, onComplete }) {
     streak: 0,
     score: 0,
     lives: 3,
+    invuln: 0,
     bounce: 0,
     spawnTimer: 0.4,
     items: [],
@@ -1190,7 +1226,7 @@ export function CatcherGame({ game, onProgress, onComplete }) {
     popups: [],
   }), []);
 
-  useEffect(() => { stateRef.current = init(); }, [init]);
+  useEffect(() => { stateRef.current = init(); }, [clock, init]);
 
   const reset = useCallback(() => {
     doneRef.current = false;
@@ -1204,7 +1240,7 @@ export function CatcherGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     function onDown(e) {
-      if (isModalChromeTarget(e)) return;
+      if (clock.isPaused() || isModalChromeTarget(e)) return;
       if (['ArrowLeft', 'KeyA'].includes(e.code)) { e.preventDefault(); keysRef.current.left = true; targetXRef.current = null; setStarted(true); }
       if (['ArrowRight', 'KeyD'].includes(e.code)) { e.preventDefault(); keysRef.current.right = true; targetXRef.current = null; setStarted(true); }
       if ((e.code === 'Space' || e.code === 'Enter') && !started && !e.repeat) { e.preventDefault(); setStarted(true); }
@@ -1219,18 +1255,20 @@ export function CatcherGame({ game, onProgress, onComplete }) {
     window.addEventListener('keydown', onDown);
     window.addEventListener('keyup', onUp);
     window.addEventListener('blur', clearHeld);
+    window.addEventListener('festeja:release-input', clearHeld);
     return () => {
       window.removeEventListener('keydown', onDown);
       window.removeEventListener('keyup', onUp);
       window.removeEventListener('blur', clearHeld);
+      window.removeEventListener('festeja:release-input', clearHeld);
     };
-  }, [started]);
+  }, [clock, started]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
 
     const tick = (now) => {
       const dt = Math.min(0.045, (now - last) / 1000);
@@ -1238,6 +1276,7 @@ export function CatcherGame({ game, onProgress, onComplete }) {
       const s = stateRef.current;
 
       if (started && !doneRef.current && s) {
+        s.invuln = Math.max(0, s.invuln - dt);
         if (s.bounce > 0) s.bounce = Math.max(0, s.bounce - dt * 5);
         let dir = (keysRef.current.right ? 1 : 0) - (keysRef.current.left ? 1 : 0);
         if (dir !== 0) {
@@ -1270,7 +1309,9 @@ export function CatcherGame({ game, onProgress, onComplete }) {
           it.y += it.vy * dt;
           if (Math.abs(it.x - s.x) < 42 && Math.abs(it.y - (H - 38)) < 24) {
             if (it.kind === 'bad') {
+              if (s.invuln > 0) continue;
               s.lives -= 1;
+              s.invuln = 0.9;
               s.streak = 0;
               sfx.hit();
               spawnParticles(s.particles, it.x, it.y, ['#ff8787', '#ffa94d'], 12);
@@ -1347,6 +1388,7 @@ export function CatcherGame({ game, onProgress, onComplete }) {
           ctx.fillText(it.icon, it.x, it.y);
         }
 
+        ctx.globalAlpha = s.invuln > 0 && Math.floor(s.invuln * 12) % 2 === 0 ? 0.45 : 1;
         // Cesta de mimbre o vaso de sidra
         const basketY = H - 36 + s.bounce * 5;
         ctx.fillStyle = game.vessel === 'glass' ? 'rgba(225, 248, 235, 0.82)' : '#d4a373';
@@ -1356,19 +1398,24 @@ export function CatcherGame({ game, onProgress, onComplete }) {
         ctx.lineWidth = 2.5;
         ctx.stroke();
 
+        ctx.globalAlpha = 1;
         const fxDt = started && !doneRef.current ? dt : 0;
         updateAndDrawParticles(ctx, s.particles, fxDt, 120);
         updateAndDrawPopups(ctx, s.popups, fxDt);
       }
 
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [badIcon, bgBottom, bgTop, game.vessel, goalCount, goldIcon, goodIcons, onComplete, onProgress, started]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, badIcon, bgBottom, bgTop, game.vessel, goalCount, goldIcon, goodIcons, onComplete, onProgress, started]);
 
   function movePointer(e) {
+    if (e.type === 'pointerdown') {
+      if (e.button !== 0) return;
+      capturePointer(e);
+    }
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
     targetXRef.current = clamp(((e.clientX - rect.left) / rect.width) * W, 46, W - 46);
@@ -1395,12 +1442,12 @@ export function CatcherGame({ game, onProgress, onComplete }) {
         )}
       </div>
       <div className="touch-controls">
-        <button type="button" className="touch-btn" onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }} onPointerUp={() => { keysRef.current.left = false; }} onPointerCancel={() => { keysRef.current.left = false; }} onPointerLeave={() => { keysRef.current.left = false; }}>
+        <HoldButton type="button" className="touch-btn" onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }} onRelease={() => { keysRef.current.left = false; }}>
           <ChevronLeft size={18} /> Izquierda
-        </button>
-        <button type="button" className="touch-btn" onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }} onPointerUp={() => { keysRef.current.right = false; }} onPointerCancel={() => { keysRef.current.right = false; }} onPointerLeave={() => { keysRef.current.right = false; }}>
+        </HoldButton>
+        <HoldButton type="button" className="touch-btn" onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }} onRelease={() => { keysRef.current.right = false; }}>
           Derecha <ChevronRight size={18} />
-        </button>
+        </HoldButton>
       </div>
     </div>
   );
@@ -1410,6 +1457,7 @@ export function CatcherGame({ game, onProgress, onComplete }) {
    6. BÓVEDA DE CRISTAL · Arkanoid de vidriera histórica (Constitución)
    ========================================================================= */
 export function BreakoutGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const canvasRef = useRef(null);
   const [started, setStarted] = useState(false);
   const [hud, setHud] = useState({ cleared: 0, total: 24, lives: 3, score: 0 });
@@ -1441,6 +1489,7 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
     return {
       paddleX: W / 2,
       paddleW: 96,
+      serveDelay: 0.7,
       ball: { x: W / 2, y: H - 52, vx: 165, vy: -225, r: 7 },
       bricks,
       total: bricks.length,
@@ -1452,7 +1501,7 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
     };
   }, []);
 
-  useEffect(() => { stateRef.current = init(); }, [init]);
+  useEffect(() => { stateRef.current = init(); }, [clock, init]);
 
   const reset = useCallback(() => {
     doneRef.current = false;
@@ -1466,7 +1515,7 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     function onDown(e) {
-      if (isModalChromeTarget(e)) return;
+      if (clock.isPaused() || isModalChromeTarget(e)) return;
       if (['ArrowLeft', 'KeyA'].includes(e.code)) { e.preventDefault(); keysRef.current.left = true; targetXRef.current = null; setStarted(true); }
       if (['ArrowRight', 'KeyD'].includes(e.code)) { e.preventDefault(); keysRef.current.right = true; targetXRef.current = null; setStarted(true); }
       if ((e.code === 'Space' || e.code === 'Enter') && !started && !e.repeat) { e.preventDefault(); setStarted(true); }
@@ -1481,18 +1530,20 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
     window.addEventListener('keydown', onDown);
     window.addEventListener('keyup', onUp);
     window.addEventListener('blur', clearHeld);
+    window.addEventListener('festeja:release-input', clearHeld);
     return () => {
       window.removeEventListener('keydown', onDown);
       window.removeEventListener('keyup', onUp);
       window.removeEventListener('blur', clearHeld);
+      window.removeEventListener('festeja:release-input', clearHeld);
     };
-  }, [started]);
+  }, [clock, started]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
 
     const tick = (now) => {
       const dt = Math.min(0.04, (now - last) / 1000);
@@ -1508,8 +1559,13 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
         }
 
         const b = s.ball;
-        b.x += b.vx * dt;
-        b.y += b.vy * dt;
+        if (s.serveDelay > 0) {
+          s.serveDelay = Math.max(0, s.serveDelay - dt);
+          b.x = s.paddleX;
+        } else {
+          b.x += b.vx * dt;
+          b.y += b.vy * dt;
+        }
 
         if (b.x - b.r < 6) { b.x = 6 + b.r; b.vx = Math.abs(b.vx); sfx.tap(); }
         if (b.x + b.r > W - 6) { b.x = W - 6 - b.r; b.vx = -Math.abs(b.vx); sfx.tap(); }
@@ -1592,6 +1648,7 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
             });
             return;
           }
+          s.serveDelay = 0.7;
           s.ball = { x: s.paddleX, y: H - 52, vx: 165, vy: -225, r: 7 };
         }
       }
@@ -1633,14 +1690,18 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
         updateAndDrawParticles(ctx, s.particles, started && !doneRef.current ? dt : 0, 80);
       }
 
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [onComplete, onProgress, started]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, onComplete, onProgress, started]);
 
   function onMove(e) {
+    if (e.type === 'pointerdown') {
+      if (e.button !== 0) return;
+      capturePointer(e);
+    }
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
     targetXRef.current = ((e.clientX - rect.left) / rect.width) * W;
@@ -1667,12 +1728,12 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
         )}
       </div>
       <div className="touch-controls">
-        <button type="button" className="touch-btn" onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }} onPointerUp={() => { keysRef.current.left = false; }} onPointerCancel={() => { keysRef.current.left = false; }} onPointerLeave={() => { keysRef.current.left = false; }}>
+        <HoldButton type="button" className="touch-btn" onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }} onRelease={() => { keysRef.current.left = false; }}>
           <ChevronLeft size={18} /> Izquierda
-        </button>
-        <button type="button" className="touch-btn" onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }} onPointerUp={() => { keysRef.current.right = false; }} onPointerCancel={() => { keysRef.current.right = false; }} onPointerLeave={() => { keysRef.current.right = false; }}>
+        </HoldButton>
+        <HoldButton type="button" className="touch-btn" onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }} onRelease={() => { keysRef.current.right = false; }}>
           Derecha <ChevronRight size={18} />
-        </button>
+        </HoldButton>
       </div>
     </div>
   );
@@ -1682,6 +1743,7 @@ export function BreakoutGame({ game, onProgress, onComplete }) {
    7. GUARDIÁN DE LOS CIRIOS · Protege las llamas del viento (Viernes Santo)
    ========================================================================= */
 export function CandlesGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const duration = game.duration ?? 24;
   const canvasRef = useRef(null);
   const [started, setStarted] = useState(false);
@@ -1700,7 +1762,7 @@ export function CandlesGame({ game, onProgress, onComplete }) {
     particles: [],
   }), [duration]);
 
-  useEffect(() => { stateRef.current = init(); }, [init]);
+  useEffect(() => { stateRef.current = init(); }, [clock, init]);
 
   const reset = useCallback(() => {
     doneRef.current = false;
@@ -1711,23 +1773,26 @@ export function CandlesGame({ game, onProgress, onComplete }) {
     setStarted(true);
   }, [duration, init, onProgress]);
 
+  const relight = useCallback(() => {
+    if (!started) { setStarted(true); return; }
+    const s = stateRef.current;
+    const unlit = s?.candles.find((c) => c.flame === 0);
+    if (!unlit || doneRef.current) return;
+    unlit.flame = 85;
+    s.shieldX = unlit.x;
+    sfx.sizzle();
+    spawnParticles(s.particles, unlit.x, 164, ['#ffe066', '#ff9f1c'], 12, 95);
+  }, [started]);
+
   useEffect(() => {
     function onDown(e) {
-      if (isModalChromeTarget(e)) return;
+      if (clock.isPaused() || isModalChromeTarget(e)) return;
       if (['ArrowLeft', 'KeyA'].includes(e.code)) { e.preventDefault(); keysRef.current.left = true; setStarted(true); }
       if (['ArrowRight', 'KeyD'].includes(e.code)) { e.preventDefault(); keysRef.current.right = true; setStarted(true); }
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         if (e.repeat) return;
-        if (!started) { setStarted(true); return; }
-        const s = stateRef.current;
-        const unlit = s?.candles.find((c) => c.flame === 0);
-        if (unlit) {
-          unlit.flame = 85;
-          s.shieldX = unlit.x;
-          sfx.sizzle();
-          spawnParticles(s.particles, unlit.x, 164, ['#ffe066', '#ff9f1c'], 12, 95);
-        }
+        relight();
       }
     }
     function onUp(e) {
@@ -1740,18 +1805,20 @@ export function CandlesGame({ game, onProgress, onComplete }) {
     window.addEventListener('keydown', onDown);
     window.addEventListener('keyup', onUp);
     window.addEventListener('blur', clearHeld);
+    window.addEventListener('festeja:release-input', clearHeld);
     return () => {
       window.removeEventListener('keydown', onDown);
       window.removeEventListener('keyup', onUp);
       window.removeEventListener('blur', clearHeld);
+      window.removeEventListener('festeja:release-input', clearHeld);
     };
-  }, [started]);
+  }, [clock, started, relight]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
     let hudAcc = 0;
 
     const tick = (now) => {
@@ -1901,14 +1968,18 @@ export function CandlesGame({ game, onProgress, onComplete }) {
         updateAndDrawParticles(ctx, s.particles, started && !doneRef.current ? dt : 0, 40);
       }
 
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [onComplete, onProgress, started]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, onComplete, onProgress, started]);
 
   function onPointer(e) {
+    if (e.type === 'pointerdown') {
+      if (e.button !== 0) return;
+      capturePointer(e);
+    }
     const rect = canvasRef.current?.getBoundingClientRect();
     const s = stateRef.current;
     if (!rect || rect.width <= 0 || !s) return;
@@ -1946,6 +2017,11 @@ export function CandlesGame({ game, onProgress, onComplete }) {
           </div>
         )}
       </div>
+      <div className="touch-controls" aria-label="Controles del guardabrisa">
+        <HoldButton className="touch-btn" aria-label="Mover guardabrisa a la izquierda" onPress={() => { setStarted(true); keysRef.current.left = true; }} onRelease={() => { keysRef.current.left = false; }}><ChevronLeft size={18} /> Izq.</HoldButton>
+        <ActionButton className="touch-btn touch-btn-accent" onAction={relight}><Flame size={16} /> Reavivar</ActionButton>
+        <HoldButton className="touch-btn" aria-label="Mover guardabrisa a la derecha" onPress={() => { setStarted(true); keysRef.current.right = true; }} onRelease={() => { keysRef.current.right = false; }}>Der. <ChevronRight size={18} /></HoldButton>
+      </div>
       <p className="game-hint"><span className="hint-sparkle">✦</span> Desliza el guardabrisa para proteger las cinco llamas hasta llegar a la plaza.</p>
     </div>
   );
@@ -1955,14 +2031,16 @@ export function CandlesGame({ game, onProgress, onComplete }) {
    8. CIRCUITO DE LUZ · Puzle de guirnaldas luminosas (Inmaculada / Jueves Santo)
    ========================================================================= */
 export function LightsGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const size = game.size ?? 4;
+  const gridNavigation = useGridNavigation(size);
   const bulbIcon = game.bulbIcon ?? '🎄';
   const [grid, setGrid] = useState(() => createLightsPuzzle(size));
   const [moves, setMoves] = useState(0);
   const finishedRef = useRef(false);
   const endTimerRef = useRef(0);
 
-  useEffect(() => () => window.clearTimeout(endTimerRef.current), []);
+  useEffect(() => () => clock.clearTimeout(endTimerRef.current), [clock]);
 
   const status = computePoweredGrid(grid);
 
@@ -1982,8 +2060,8 @@ export function LightsGame({ game, onProgress, onComplete }) {
       finishedRef.current = true;
       const stars = nextMoves <= size * size + 2 ? 3 : nextMoves <= size * size * 2 ? 2 : 1;
       sfx.win();
-      window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => {
+      clock.clearTimeout(endTimerRef.current);
+      endTimerRef.current = clock.setTimeout(() => {
         onComplete({
           won: true,
           score: nextStatus.total,
@@ -1997,7 +2075,7 @@ export function LightsGame({ game, onProgress, onComplete }) {
   }
 
   function reset() {
-    window.clearTimeout(endTimerRef.current);
+    clock.clearTimeout(endTimerRef.current);
     finishedRef.current = false;
     const fresh = createLightsPuzzle(size);
     setGrid(fresh);
@@ -2013,12 +2091,13 @@ export function LightsGame({ game, onProgress, onComplete }) {
         <button type="button" onClick={reset} aria-label="Nuevo circuito de luces"><RotateCcw size={14} /></button>
       </div>
 
-      <div className="lights-board" style={{ '--lights-size': size }} role="grid" aria-label={game.title}>
+      <div className="lights-board" style={{ '--lights-size': size }} role="group" aria-roledescription="tablero" aria-label={game.title} onKeyDown={gridNavigation.onKeyDown}>
         {grid.map((row, r) => row.map((cell, c) => {
           const mask = currentCellMask(cell);
           const lit = status.powered[r][c];
           return (
             <button
+              {...gridNavigation.cellProps(r * size + c)}
               key={`${r}-${c}`}
               type="button"
               className={`lights-tile ${lit ? 'is-lit' : ''} ${cell.isSource ? 'is-source' : ''}`}
