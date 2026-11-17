@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useGameClock, useGridNavigation } from './GameSession.jsx';
 import { Check, RotateCcw, Sparkles, Star } from 'lucide-react';
 import {
   areAdjacent,
@@ -21,13 +22,10 @@ const DEFAULT_CANDIES = [
 
 const COMBO_CALLOUTS = ['', '', '¡DULCE ×2!', '¡DELICIOSO ×3!', '¡MÁGICO ×4!', '¡LEGENDARIO ×5!'];
 
-function delay(ms) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
-
 export default function Match3Game({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
+  const delay = clock.delay;
+  const gridNavigation = useGridNavigation(game.size ?? 7);
   const size = game.size ?? 7;
   const candies = game.candies ?? DEFAULT_CANDIES;
   const bombIcon = game.bombIcon ?? '🔮';
@@ -46,6 +44,7 @@ export default function Match3Game({ game, onProgress, onComplete }) {
   const [callout, setCallout] = useState('');
   const [laserLine, setLaserLine] = useState(null);
 
+  const boardRef = useRef(null);
   const mountedRef = useRef(true);
   const dragStartRef = useRef(null);
   const suppressClickRef = useRef(false);
@@ -53,33 +52,42 @@ export default function Match3Game({ game, onProgress, onComplete }) {
   const calloutTimerRef = useRef(0);
   const scoreRef = useRef(0);
   const finishedRef = useRef(false);
+  const busyRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      window.clearTimeout(calloutTimerRef.current);
-      window.clearTimeout(suppressTimerRef.current);
+      clock.clearTimeout(calloutTimerRef.current);
+      clock.clearTimeout(suppressTimerRef.current);
     };
-  }, []);
+  }, [clock]);
+
+  useEffect(() => {
+    // Las piezas se reemplazan durante las cascadas; conservar el foco lógico
+    // evita dejar al jugador de teclado fuera del diálogo al desaparecer un dulce.
+    if (document.activeElement === document.body) {
+      boardRef.current?.querySelector(`[data-grid-index="${gridNavigation.focusedIndex}"]`)?.focus({ preventScroll: true });
+    }
+  }, [board, busy, gridNavigation.focusedIndex]);
 
   const showCallout = useCallback((text) => {
-    window.clearTimeout(calloutTimerRef.current);
+    clock.clearTimeout(calloutTimerRef.current);
     setCallout(text);
-  }, []);
+  }, [clock]);
 
   // Pista sutil si el jugador lleva unos segundos buscando jugada
   useEffect(() => {
     setHintKeys(new Set());
-    if (busy || movesLeft <= 0) return undefined;
-    const timer = window.setTimeout(() => {
+    if (busyRef.current || finishedRef.current || movesLeft <= 0) return undefined;
+    const timer = clock.setTimeout(() => {
       const move = findValidMove(board);
       if (move && mountedRef.current) {
         setHintKeys(new Set(move.map((p) => `${p.r},${p.c}`)));
       }
     }, 4500);
-    return () => window.clearTimeout(timer);
-  }, [board, busy, movesLeft]);
+    return () => clock.clearTimeout(timer);
+  }, [clock, board, busy, movesLeft]);
 
   const finishGame = useCallback((finalScore, remainingMoves = 0) => {
     if (finishedRef.current || !mountedRef.current) return;
@@ -124,13 +132,11 @@ export default function Match3Game({ game, onProgress, onComplete }) {
       showCallout(`¡EXPLOSIÓN +${gained}!`);
       setScore(runningScore);
       onProgress?.(runningScore);
-      await delay(230);
-      if (!mountedRef.current) return;
+      if (!(await delay(230)) || !mountedRef.current) return;
       setBurstKeys(new Set());
       working = firstSpecialResult.refilledBoard;
       setBoard(working);
-      await delay(190);
-      if (!mountedRef.current) return;
+      if (!(await delay(190)) || !mountedRef.current) return;
     }
 
     while (combo < 14) {
@@ -161,41 +167,39 @@ export default function Match3Game({ game, onProgress, onComplete }) {
       setScore(runningScore);
       onProgress?.(runningScore);
 
-      await delay(210);
-      if (!mountedRef.current) return;
+      if (!(await delay(210)) || !mountedRef.current) return;
       setBurstKeys(new Set());
       setLaserLine(null);
       working = step.refilledBoard;
       setBoard(working);
-      await delay(180);
-      if (!mountedRef.current) return;
+      if (!(await delay(180)) || !mountedRef.current) return;
     }
 
     // Reordenar automáticamente si no quedan jugadas
     if (!findValidMove(working)) {
       showCallout('¡Mezclando dulces!');
-      await delay(320);
-      if (!mountedRef.current) return;
+      if (!(await delay(320)) || !mountedRef.current) return;
       working = createMatch3Board(size, candies.length);
       setBoard(working);
     }
 
-    window.clearTimeout(calloutTimerRef.current);
-    calloutTimerRef.current = window.setTimeout(() => {
+    clock.clearTimeout(calloutTimerRef.current);
+    calloutTimerRef.current = clock.setTimeout(() => {
       if (mountedRef.current) setCallout('');
     }, 650);
 
-    setBusy(false);
-
     const threeStarScore = Math.round(target * 1.45);
     if (nextMoves <= 0 || runningScore >= threeStarScore) {
-      await delay(340);
-      finishGame(runningScore, nextMoves);
+      if (await delay(340)) finishGame(runningScore, nextMoves);
+      return;
     }
-  }, [candies.length, finishGame, onProgress, showCallout, size, target]);
+    busyRef.current = false;
+    setBusy(false);
+  }, [clock, target, showCallout, onProgress, delay, candies.length, size, finishGame]);
 
   const attemptSwap = useCallback(async (a, b) => {
-    if (busy || movesLeft <= 0 || !areAdjacent(a, b)) return;
+    if (busyRef.current || finishedRef.current || movesLeft <= 0 || !areAdjacent(a, b)) return;
+    busyRef.current = true;
     setBusy(true);
     setSelected(null);
     setHintKeys(new Set());
@@ -220,10 +224,10 @@ export default function Match3Game({ game, onProgress, onComplete }) {
     if (!probe) {
       setInvalidPair(new Set([`${a.r},${a.c}`, `${b.r},${b.c}`]));
       sfx.invalid();
-      await delay(230);
-      if (!mountedRef.current) return;
+      if (!(await delay(230)) || !mountedRef.current) return;
       setInvalidPair(new Set());
       setBoard(board);
+      busyRef.current = false;
       setBusy(false);
       return;
     }
@@ -231,14 +235,14 @@ export default function Match3Game({ game, onProgress, onComplete }) {
     const nextMoves = movesLeft - 1;
     setMovesLeft(nextMoves);
     await runCascade(swapped, [b, a], null, nextMoves);
-  }, [board, busy, candies.length, movesLeft, runCascade]);
+  }, [movesLeft, board, candies.length, runCascade, delay]);
 
   function handleTileClick(r, c) {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
       return;
     }
-    if (busy || movesLeft <= 0) return;
+    if (busyRef.current || finishedRef.current || movesLeft <= 0) return;
     if (!selected) {
       sfx.tap();
       setSelected({ r, c });
@@ -256,17 +260,40 @@ export default function Match3Game({ game, onProgress, onComplete }) {
     }
   }
 
+  function handleGridKeyDown(event) {
+    const cell = event.target.closest('[data-grid-index]');
+    if (!cell) return;
+    if (event.key === 'Escape' && selected) {
+      event.preventDefault();
+      event.stopPropagation();
+      setSelected(null);
+      return;
+    }
+    if (event.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const index = Number(cell.dataset.gridIndex);
+      const from = { r: Math.floor(index / size), c: index % size };
+      const to = { r: from.r + (event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0), c: from.c + (event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0) };
+      if (to.r >= 0 && to.r < size && to.c >= 0 && to.c < size) attemptSwap(from, to);
+      return;
+    }
+    gridNavigation.onKeyDown(event);
+  }
+
   function handlePointerDown(event, r, c) {
-    if (busy || movesLeft <= 0) return;
-    dragStartRef.current = { r, c, x: event.clientX, y: event.clientY, swapped: false };
+    if (event.button !== 0) return;
+    if (busyRef.current || finishedRef.current || movesLeft <= 0) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragStartRef.current = { r, c, x: event.clientX, y: event.clientY, pointerId: event.pointerId, threshold: Math.max(10, Math.min(22, event.currentTarget.clientWidth * 0.35)), swapped: false };
   }
 
   function handlePointerMove(event) {
     const start = dragStartRef.current;
-    if (!start || start.swapped || busy) return;
+    if (!start || start.pointerId !== event.pointerId || start.swapped || busyRef.current) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
-    const threshold = 18;
+    const threshold = start.threshold;
     if (Math.hypot(dx, dy) < threshold) return;
 
     let targetR = start.r;
@@ -279,8 +306,8 @@ export default function Match3Game({ game, onProgress, onComplete }) {
 
     start.swapped = true;
     suppressClickRef.current = true;
-    window.clearTimeout(suppressTimerRef.current);
-    suppressTimerRef.current = window.setTimeout(() => { suppressClickRef.current = false; }, 320);
+    clock.clearTimeout(suppressTimerRef.current);
+    suppressTimerRef.current = clock.setTimeout(() => { suppressClickRef.current = false; }, 320);
     dragStartRef.current = null;
     if (targetR >= 0 && targetR < size && targetC >= 0 && targetC < size) {
       attemptSwap({ r: start.r, c: start.c }, { r: targetR, c: targetC });
@@ -292,9 +319,9 @@ export default function Match3Game({ game, onProgress, onComplete }) {
   }
 
   function resetGame() {
-    if (busy) return;
-    window.clearTimeout(calloutTimerRef.current);
-    window.clearTimeout(suppressTimerRef.current);
+    if (busyRef.current) return;
+    clock.clearTimeout(calloutTimerRef.current);
+    clock.clearTimeout(suppressTimerRef.current);
     suppressClickRef.current = false;
     finishedRef.current = false;
     scoreRef.current = 0;
@@ -303,6 +330,8 @@ export default function Match3Game({ game, onProgress, onComplete }) {
     setSelected(null);
     setCallout('');
     setLaserLine(null);
+    setHintKeys(new Set());
+    setInvalidPair(new Set());
     setBurstKeys(new Set());
     setBoard(createMatch3Board(size, candies.length));
     onProgress?.(0);
@@ -344,9 +373,13 @@ export default function Match3Game({ game, onProgress, onComplete }) {
         )}
         <div
           className="m3-board"
+          ref={boardRef}
           style={{ '--m3-size': size }}
           onPointerMove={handlePointerMove}
-          role="grid"
+          role="group"
+          aria-roledescription="tablero"
+          aria-busy={busy}
+          onKeyDown={handleGridKeyDown}
           aria-label={game.title}
         >
           {laserLine && (
@@ -376,6 +409,7 @@ export default function Match3Game({ game, onProgress, onComplete }) {
 
             return (
               <button
+                {...gridNavigation.cellProps(r * size + c)}
                 key={cell.id}
                 type="button"
                 className={classes}
@@ -387,6 +421,7 @@ export default function Match3Game({ game, onProgress, onComplete }) {
                 }}
                 onPointerDown={(event) => handlePointerDown(event, r, c)}
                 onClick={() => handleTileClick(r, c)}
+                aria-pressed={isSelected}
                 aria-label={`${isBomb ? 'Caldero mágico' : candy.label} fila ${r + 1} columna ${c + 1}${cell.special === 'row' ? ' rayado horizontal' : cell.special === 'col' ? ' rayado vertical' : ''}`}
               >
                 <span className="m3-tile-gloss" aria-hidden="true" />

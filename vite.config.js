@@ -9,6 +9,8 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     allowedHosts: ['.e2b.app'],
+    // Las trazas HTML de Playwright no deben recargar las partidas ni otras pruebas.
+    watch: { ignored: ['**/.cache/**', '**/playwright-report/**', '**/test-results/**'] },
   },
   preview: {
     host: '0.0.0.0',

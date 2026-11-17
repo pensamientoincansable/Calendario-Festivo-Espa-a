@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { capturePointer } from './inputUtils.js';
+import { useGameClock, HoldButton, ActionButton } from './GameSession.jsx';
 import { ChevronLeft, ChevronRight, Gift, Play, RotateCcw } from 'lucide-react';
 import {
   clamp,
@@ -107,6 +109,7 @@ function drawReyesCaravan(ctx, centerX, y, time, activeKing) {
 }
 
 export default function ReyesGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const goalGifts = game.goal ?? 12;
   const canvasRef = useRef(null);
   const [started, setStarted] = useState(false);
@@ -159,7 +162,7 @@ export default function ReyesGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     stateRef.current = initState();
-  }, [initState]);
+  }, [clock, initState]);
 
   const tossGift = useCallback(() => {
     const s = stateRef.current;
@@ -190,7 +193,7 @@ export default function ReyesGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     function onKeyDown(e) {
-      if (isModalChromeTarget(e)) return;
+      if (clock.isPaused() || isModalChromeTarget(e)) return;
       if (['ArrowLeft', 'KeyA'].includes(e.code)) {
         e.preventDefault();
         keysRef.current.left = true;
@@ -221,18 +224,20 @@ export default function ReyesGame({ game, onProgress, onComplete }) {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearHeld);
+    window.addEventListener('festeja:release-input', clearHeld);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', clearHeld);
+      window.removeEventListener('festeja:release-input', clearHeld);
     };
-  }, [started, tossGift]);
+  }, [clock, started, tossGift]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
     let hudAcc = 0;
 
     const render = (s, fxDt) => {
@@ -509,12 +514,12 @@ export default function ReyesGame({ game, onProgress, onComplete }) {
       }
 
       if (s) render(s, started && !doneRef.current ? dt : 0);
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [goalGifts, onComplete, onProgress, started]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, goalGifts, onComplete, onProgress, started]);
 
   function handlePointerMove(e) {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -523,6 +528,8 @@ export default function ReyesGame({ game, onProgress, onComplete }) {
   }
 
   function handleCanvasClick(e) {
+    if (e.button !== 0) return;
+    capturePointer(e);
     const rect = canvasRef.current?.getBoundingClientRect();
     if (rect && rect.width > 0) {
       const aimX = clamp(((e.clientX - rect.left) / rect.width) * W, 54, W - 54);
@@ -567,36 +574,32 @@ export default function ReyesGame({ game, onProgress, onComplete }) {
       </div>
 
       <div className="touch-controls" aria-label="Controles de los Reyes Magos">
-        <button
+        <HoldButton
           type="button"
           className="touch-btn"
-          onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }}
-          onPointerUp={() => { keysRef.current.left = false; }}
-          onPointerCancel={() => { keysRef.current.left = false; }}
-          onPointerLeave={() => { keysRef.current.left = false; }}
+          onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }}
+          onRelease={() => { keysRef.current.left = false; }}
           aria-label="Mover a la izquierda"
         >
           <ChevronLeft size={18} /> Izq.
-        </button>
-        <button
+        </HoldButton>
+        <ActionButton
           type="button"
           className="touch-btn touch-btn-accent"
-          onClick={() => { setStarted(true); tossGift(); }}
+          onAction={() => { setStarted(true); tossGift(); }}
           aria-label="Lanzar regalo al balcón"
         >
           <Gift size={16} /> Lanzar ({hud.king})
-        </button>
-        <button
+        </ActionButton>
+        <HoldButton
           type="button"
           className="touch-btn"
-          onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }}
-          onPointerUp={() => { keysRef.current.right = false; }}
-          onPointerCancel={() => { keysRef.current.right = false; }}
-          onPointerLeave={() => { keysRef.current.right = false; }}
+          onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }}
+          onRelease={() => { keysRef.current.right = false; }}
           aria-label="Mover a la derecha"
         >
           Der. <ChevronRight size={18} />
-        </button>
+        </HoldButton>
       </div>
     </div>
   );

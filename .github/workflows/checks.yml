@@ -1,0 +1,48 @@
+name: Comprobar aplicación
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Código, tests y navegador
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Instalar dependencias
+        run: npm ci
+      - name: Revisar el código
+        run: npm run lint
+      - name: Ejecutar pruebas unitarias
+        run: npm test
+      - name: Compilar la aplicación
+        run: npm run build
+      - name: Instalar Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Probar PC y emulación Android
+        run: npm run test:e2e
+      - name: Conservar las trazas si falla una prueba
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trazas-playwright
+          path: .cache/playwright-results
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

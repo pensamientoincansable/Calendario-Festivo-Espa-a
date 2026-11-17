@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { capturePointer } from './inputUtils.js';
+import { useGameClock, HoldButton } from './GameSession.jsx';
 import { ChevronLeft, ChevronRight, Play, RotateCcw, Zap } from 'lucide-react';
 import {
   clamp,
@@ -298,6 +300,7 @@ function drawBike(ctx, x, y, bodyColor, tilt = 0, turbo = false) {
 }
 
 export default function RaceGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const preset = TRACK_PRESETS[game.track ?? 'highway'] ?? TRACK_PRESETS.highway;
   const goalDistance = game.distance ?? 2400;
   const tokenIcon = game.tokenIcon ?? preset.tokenIcon;
@@ -358,11 +361,11 @@ export default function RaceGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     stateRef.current = initState();
-  }, [initState]);
+  }, [clock, initState]);
 
   useEffect(() => {
     function onKeyDown(e) {
-      if (isModalChromeTarget(e)) return;
+      if (clock.isPaused() || isModalChromeTarget(e)) return;
       if (['ArrowLeft', 'KeyA'].includes(e.code)) {
         e.preventDefault();
         keysRef.current.left = true;
@@ -396,22 +399,25 @@ export default function RaceGame({ game, onProgress, onComplete }) {
     function clearHeld() {
       keysRef.current = { left: false, right: false, boost: false };
       draggingRef.current = false;
+      targetXRef.current = null;
     }
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearHeld);
+    window.addEventListener('festeja:release-input', clearHeld);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', clearHeld);
+      window.removeEventListener('festeja:release-input', clearHeld);
     };
-  }, [started]);
+  }, [clock, started]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
     let hudTimer = 0;
 
     const render = (s, fxDt) => {
@@ -636,7 +642,7 @@ export default function RaceGame({ game, onProgress, onComplete }) {
           const diff = targetXRef.current - s.playerX;
           s.vx = clamp(diff * 9, -lateralSpeed * 1.15, lateralSpeed * 1.15);
         } else {
-          s.vx *= 0.8;
+          s.vx *= Math.exp(-13.4 * dt);
         }
         s.playerX = clamp(s.playerX + s.vx * dt, ROAD_X + 20, ROAD_X + ROAD_W - 20);
 
@@ -796,12 +802,12 @@ export default function RaceGame({ game, onProgress, onComplete }) {
       }
 
       if (s) render(s, started && !doneRef.current ? dt : 0);
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [goalDistance, onComplete, onProgress, preset, started, tokenIcon]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, goalDistance, onComplete, onProgress, preset, started, tokenIcon]);
 
   function handleCanvasPointer(event) {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -825,11 +831,11 @@ export default function RaceGame({ game, onProgress, onComplete }) {
         <canvas
           ref={canvasRef}
           className="game-canvas"
-          onPointerDown={(e) => { draggingRef.current = true; handleCanvasPointer(e); }}
+          onPointerDown={(e) => { if (e.button !== 0) return; capturePointer(e); draggingRef.current = true; handleCanvasPointer(e); }}
           onPointerMove={(e) => { if (draggingRef.current || e.buttons > 0) handleCanvasPointer(e); }}
           onPointerUp={() => { draggingRef.current = false; }}
           onPointerCancel={() => { draggingRef.current = false; }}
-          onPointerLeave={() => { draggingRef.current = false; }}
+          onLostPointerCapture={() => { draggingRef.current = false; }}
           aria-label={game.title}
         />
         {!started && (
@@ -843,39 +849,33 @@ export default function RaceGame({ game, onProgress, onComplete }) {
       </div>
 
       <div className="touch-controls" aria-label="Controles de carrera">
-        <button
+        <HoldButton
           type="button"
           className="touch-btn"
-          onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }}
-          onPointerUp={() => { keysRef.current.left = false; }}
-          onPointerCancel={() => { keysRef.current.left = false; }}
-          onPointerLeave={() => { keysRef.current.left = false; }}
+          onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.left = true; }}
+          onRelease={() => { keysRef.current.left = false; }}
           aria-label="Girar a la izquierda"
         >
           <ChevronLeft size={18} /> Izq.
-        </button>
-        <button
+        </HoldButton>
+        <HoldButton
           type="button"
           className="touch-btn touch-btn-accent"
-          onPointerDown={() => { setStarted(true); if (stateRef.current?.nitro > 15) sfx.boost(); keysRef.current.boost = true; }}
-          onPointerUp={() => { keysRef.current.boost = false; }}
-          onPointerCancel={() => { keysRef.current.boost = false; }}
-          onPointerLeave={() => { keysRef.current.boost = false; }}
+          onPress={() => { setStarted(true); if (stateRef.current?.nitro > 15) sfx.boost(); keysRef.current.boost = true; }}
+          onRelease={() => { keysRef.current.boost = false; }}
           aria-label="Activar turbo"
         >
           <Zap size={16} /> Turbo
-        </button>
-        <button
+        </HoldButton>
+        <HoldButton
           type="button"
           className="touch-btn"
-          onPointerDown={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }}
-          onPointerUp={() => { keysRef.current.right = false; }}
-          onPointerCancel={() => { keysRef.current.right = false; }}
-          onPointerLeave={() => { keysRef.current.right = false; }}
+          onPress={() => { setStarted(true); targetXRef.current = null; keysRef.current.right = true; }}
+          onRelease={() => { keysRef.current.right = false; }}
           aria-label="Girar a la derecha"
         >
           Der. <ChevronRight size={18} />
-        </button>
+        </HoldButton>
       </div>
     </div>
   );

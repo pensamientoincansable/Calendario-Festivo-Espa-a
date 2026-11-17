@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useGameClock, HoldButton, ActionButton } from './GameSession.jsx';
 import { ChevronDown, ChevronUp, Gift, Play, RotateCcw } from 'lucide-react';
 import {
   clamp,
@@ -126,12 +127,14 @@ function drawSantaSleigh(ctx, x, y, time, tilt) {
 }
 
 export default function SantaGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const goalGifts = game.goal ?? 10;
   const canvasRef = useRef(null);
   const [started, setStarted] = useState(false);
   const [hud, setHud] = useState({ delivered: 0, score: 0, lives: 3, streak: 0 });
 
   const keysRef = useRef({ up: false, down: false });
+  const altitudePointerRef = useRef(null);
   const stateRef = useRef(null);
   const doneRef = useRef(false);
 
@@ -176,7 +179,7 @@ export default function SantaGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     stateRef.current = initState();
-  }, [initState]);
+  }, [clock, initState]);
 
   const dropGift = useCallback(() => {
     const s = stateRef.current;
@@ -210,7 +213,7 @@ export default function SantaGame({ game, onProgress, onComplete }) {
 
   useEffect(() => {
     function onKeyDown(e) {
-      if (isModalChromeTarget(e)) return;
+      if (clock.isPaused() || isModalChromeTarget(e)) return;
       if (['ArrowUp', 'KeyW'].includes(e.code)) {
         e.preventDefault();
         keysRef.current.up = true;
@@ -235,22 +238,25 @@ export default function SantaGame({ game, onProgress, onComplete }) {
     }
     function clearHeld() {
       keysRef.current = { up: false, down: false };
+      altitudePointerRef.current = null;
     }
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearHeld);
+    window.addEventListener('festeja:release-input', clearHeld);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', clearHeld);
+      window.removeEventListener('festeja:release-input', clearHeld);
     };
-  }, [dropGift, started]);
+  }, [clock, dropGift, started]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
 
     const draw = (s, fxDt) => {
       const ctx = setupHiDPICanvas(canvas, W, H);
@@ -567,28 +573,32 @@ export default function SantaGame({ game, onProgress, onComplete }) {
       }
 
       if (s) draw(s, started && !doneRef.current ? dt : 0);
-      rafId = window.requestAnimationFrame(tick);
+      if (started) rafId = clock.requestFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [goalGifts, onComplete, onProgress, started]);
+    rafId = clock.requestFrame(tick);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, goalGifts, onComplete, onProgress, started]);
+
+  function moveAltitude(event) {
+    if (altitudePointerRef.current !== event.pointerId) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect?.height || !stateRef.current) return;
+    stateRef.current.y = clamp(((event.clientY - rect.top) / rect.height) * H, 34, 174);
+    stateRef.current.vy = 0;
+  }
 
   function handleCanvasTap(event) {
-    if (!started) {
-      setStarted(true);
-      return;
-    }
+    if (event.button !== 0) return;
+    if (!started) setStarted(true);
     const rect = canvasRef.current?.getBoundingClientRect();
-    if (rect && rect.width > 0 && rect.height > 0 && stateRef.current) {
-      const relX = ((event.clientX - rect.left) / rect.width) * W;
-      const relY = ((event.clientY - rect.top) / rect.height) * H;
-      if (relX < 185) {
-        stateRef.current.y = clamp(relY, 34, 174);
-        return;
-      }
+    if (rect?.width && ((event.clientX - rect.left) / rect.width) * W < 185) {
+      altitudePointerRef.current = event.pointerId;
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      moveAltitude(event);
+    } else {
+      dropGift();
     }
-    dropGift();
   }
 
   return (
@@ -601,7 +611,7 @@ export default function SantaGame({ game, onProgress, onComplete }) {
       </div>
 
       <div className="canvas-frame">
-        <canvas ref={canvasRef} className="game-canvas" onPointerDown={handleCanvasTap} aria-label={game.title} />
+        <canvas ref={canvasRef} className="game-canvas" onPointerDown={handleCanvasTap} onPointerMove={moveAltitude} onPointerUp={(event) => { if (altitudePointerRef.current === event.pointerId) altitudePointerRef.current = null; }} onPointerCancel={(event) => { if (altitudePointerRef.current === event.pointerId) altitudePointerRef.current = null; }} onLostPointerCapture={(event) => { if (altitudePointerRef.current === event.pointerId) altitudePointerRef.current = null; }} aria-label={game.title} />
         {!started && (
           <div className="canvas-overlay">
             <button type="button" className="canvas-start-btn" onClick={() => { sfx.gift(); setStarted(true); }}>
@@ -613,36 +623,32 @@ export default function SantaGame({ game, onProgress, onComplete }) {
       </div>
 
       <div className="touch-controls" aria-label="Controles del trineo">
-        <button
+        <HoldButton
           type="button"
           className="touch-btn"
-          onPointerDown={() => { setStarted(true); keysRef.current.up = true; }}
-          onPointerUp={() => { keysRef.current.up = false; }}
-          onPointerCancel={() => { keysRef.current.up = false; }}
-          onPointerLeave={() => { keysRef.current.up = false; }}
+          onPress={() => { setStarted(true); keysRef.current.up = true; }}
+          onRelease={() => { keysRef.current.up = false; }}
           aria-label="Subir trineo"
         >
           <ChevronUp size={18} /> Subir
-        </button>
-        <button
+        </HoldButton>
+        <ActionButton
           type="button"
           className="touch-btn touch-btn-accent"
-          onClick={() => { setStarted(true); dropGift(); }}
+          onAction={() => { setStarted(true); dropGift(); }}
           aria-label="Soltar regalo por la chimenea"
         >
           <Gift size={16} /> Soltar regalo
-        </button>
-        <button
+        </ActionButton>
+        <HoldButton
           type="button"
           className="touch-btn"
-          onPointerDown={() => { setStarted(true); keysRef.current.down = true; }}
-          onPointerUp={() => { keysRef.current.down = false; }}
-          onPointerCancel={() => { keysRef.current.down = false; }}
-          onPointerLeave={() => { keysRef.current.down = false; }}
+          onPress={() => { setStarted(true); keysRef.current.down = true; }}
+          onRelease={() => { keysRef.current.down = false; }}
           aria-label="Bajar trineo"
         >
           <ChevronDown size={18} /> Bajar
-        </button>
+        </HoldButton>
       </div>
     </div>
   );

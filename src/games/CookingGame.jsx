@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useGameClock, ActionButton } from './GameSession.jsx';
 import { ArrowRight, Check, Flame, RotateCcw, Sparkles, Star } from 'lucide-react';
 import { sfx } from '../sound.js';
 import { isModalChromeTarget } from './canvasUtils.js';
@@ -85,6 +86,7 @@ export const SPANISH_RECIPES_NATIONAL = [
 ];
 
 export default function CookingGame({ game, onProgress, onComplete }) {
+  const clock = useGameClock();
   const recipes = game.recipes ?? SPANISH_RECIPES_NATIONAL;
   const [recipeIndex, setRecipeIndex] = useState(0);
   const [phase, setPhase] = useState('prep'); // 'prep' | 'cook' | 'plated'
@@ -95,7 +97,8 @@ export default function CookingGame({ game, onProgress, onComplete }) {
   const [dishResults, setDishResults] = useState([]);
 
   // Estado de la fase de cocción interactiva
-  const [cursor, setCursor] = useState(12);
+  const needleRef = useRef(null);
+  const kitchenRef = useRef(null);
   const [flipping, setFlipping] = useState(false);
   const [emulsionProgress, setEmulsionProgress] = useState(0);
 
@@ -115,11 +118,21 @@ export default function CookingGame({ game, onProgress, onComplete }) {
   const flipLockRef = useRef(false);
   const timerRef = useRef(0);
 
-  useEffect(() => () => window.clearTimeout(timerRef.current), []);
+  function paintCursor(value) {
+    cursorRef.current = value;
+    if (needleRef.current) needleRef.current.style.left = `${value}%`;
+  }
+
+  useEffect(() => {
+    if (phase === 'cook') kitchenRef.current?.closest('.game-play-surface')?.focus({ preventScroll: true });
+    if (phase === 'plated') kitchenRef.current?.querySelector('.cook-action-btn')?.focus({ preventScroll: true });
+  }, [phase]);
+
+  useEffect(() => () => clock.clearTimeout(timerRef.current), [clock]);
 
   // Preparar cada nueva receta
   useEffect(() => {
-    window.clearTimeout(timerRef.current);
+    clock.clearTimeout(timerRef.current);
     setAddedIds([]);
     setWrongIds([]);
     setMistakes(0);
@@ -127,14 +140,14 @@ export default function CookingGame({ game, onProgress, onComplete }) {
     setPhase('prep');
     setFlipping(false);
     const startPos = recipe.technique === 'blend' ? 25 : 8;
-    setCursor(startPos);
+    paintCursor(startPos);
     setEmulsionProgress(0);
     cursorRef.current = startPos;
     directionRef.current = 1;
     emulsionRef.current = 0;
     cookDoneRef.current = false;
     flipLockRef.current = false;
-  }, [recipeIndex, recipe.technique]);
+  }, [clock, recipeIndex, recipe.technique]);
 
   function finishDish(cookAccuracy) {
     if (cookDoneRef.current) return;
@@ -165,11 +178,13 @@ export default function CookingGame({ game, onProgress, onComplete }) {
   useEffect(() => {
     if (phase !== 'cook') return undefined;
     let rafId = 0;
-    let last = performance.now();
+    let last = clock.now();
+    let hudAcc = 0;
 
     const step = (now) => {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
+      hudAcc += dt;
 
       if (recipe.technique === 'flip') {
         if (flipLockRef.current) return;
@@ -183,12 +198,12 @@ export default function CookingGame({ game, onProgress, onComplete }) {
           directionRef.current = 1;
         }
         cursorRef.current = next;
-        setCursor(next);
+        paintCursor(next);
       } else if (recipe.technique === 'simmer') {
         const speed = 30;
         const next = Math.min(100, cursorRef.current + speed * dt);
         cursorRef.current = next;
-        setCursor(next);
+        paintCursor(next);
         if (next >= 100) {
           setFeedback({ text: '¡Uy, casi se arrebata el fuego!', warn: true });
           finishDishRef.current(0);
@@ -197,10 +212,13 @@ export default function CookingGame({ game, onProgress, onComplete }) {
       } else if (recipe.technique === 'blend') {
         const next = Math.max(4, cursorRef.current - 32 * dt);
         cursorRef.current = next;
-        setCursor(next);
+        paintCursor(next);
         if (next >= 46 && next <= 86) {
           emulsionRef.current = Math.min(100, emulsionRef.current + 44 * dt);
-          setEmulsionProgress(Math.round(emulsionRef.current));
+          if (hudAcc >= 0.1) {
+            hudAcc = 0;
+            setEmulsionProgress(Math.round(emulsionRef.current));
+          }
           if (emulsionRef.current >= 100) {
             finishDishRef.current(2);
             return;
@@ -208,12 +226,12 @@ export default function CookingGame({ game, onProgress, onComplete }) {
         }
       }
 
-      rafId = window.requestAnimationFrame(step);
+      rafId = clock.requestFrame(step);
     };
 
-    rafId = window.requestAnimationFrame(step);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [phase, recipe.technique, recipeIndex]);
+    rafId = clock.requestFrame(step);
+    return () => clock.cancelFrame(rafId);
+  }, [clock, phase, recipe.technique, recipeIndex]);
 
   const triggerCookRef = useRef(null);
 
@@ -221,7 +239,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
   useEffect(() => {
     if (phase !== 'cook') return undefined;
     function onKey(event) {
-      if (event.repeat || isModalChromeTarget(event)) return;
+      if (event.repeat || clock.isPaused() || isModalChromeTarget(event)) return;
       if (event.code === 'Space' || event.code === 'Enter') {
         event.preventDefault();
         triggerCookRef.current?.();
@@ -229,7 +247,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase]);
+  }, [clock, phase]);
 
   function pickIngredient(item) {
     if (phase !== 'prep') return;
@@ -241,8 +259,8 @@ export default function CookingGame({ game, onProgress, onComplete }) {
       setAddedIds(nextAdded);
       setFeedback({ text: `¡${item.label} a la cazuela!`, warn: false });
       if (nextAdded.length === recipe.ingredients.length) {
-        window.clearTimeout(timerRef.current);
-        timerRef.current = window.setTimeout(() => {
+        clock.clearTimeout(timerRef.current);
+        timerRef.current = clock.setTimeout(() => {
           setFeedback(null);
           setPhase('cook');
         }, 380);
@@ -264,8 +282,8 @@ export default function CookingGame({ game, onProgress, onComplete }) {
       sfx.flip();
       setFlipping(true);
       const accuracy = pos >= 40 && pos <= 62 ? 2 : pos >= 26 && pos <= 76 ? 1 : 0;
-      window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => finishDish(accuracy), 420);
+      clock.clearTimeout(timerRef.current);
+      timerRef.current = clock.setTimeout(() => finishDish(accuracy), 420);
     } else if (recipe.technique === 'simmer') {
       sfx.sizzle();
       const accuracy = pos >= 60 && pos <= 82 ? 2 : pos >= 46 && pos <= 91 ? 1 : 0;
@@ -274,7 +292,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
       sfx.tap();
       const boosted = Math.min(97, cursorRef.current + 17);
       cursorRef.current = boosted;
-      setCursor(boosted);
+      paintCursor(boosted);
       if (boosted >= 46 && boosted <= 86) {
         emulsionRef.current = Math.min(100, emulsionRef.current + 9);
         setEmulsionProgress(Math.round(emulsionRef.current));
@@ -307,7 +325,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
   }
 
   function resetKitchen() {
-    window.clearTimeout(timerRef.current);
+    clock.clearTimeout(timerRef.current);
     const firstTechnique = recipes[0]?.technique;
     const startPos = firstTechnique === 'blend' ? 25 : 8;
     setDishResults([]);
@@ -317,7 +335,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
     setMistakes(0);
     setFeedback(null);
     setFlipping(false);
-    setCursor(startPos);
+    paintCursor(startPos);
     setEmulsionProgress(0);
     cursorRef.current = startPos;
     directionRef.current = 1;
@@ -338,7 +356,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
   const latestResult = dishResults[dishResults.length - 1];
 
   return (
-    <div className="cook-wrap">
+    <div className="cook-wrap" ref={kitchenRef}>
       <div className="game-stats-line">
         <span>RECETA <strong>0{recipeIndex + 1}/0{recipes.length}</strong></span>
         <span>ESTRELLAS <strong>{dishResults.reduce((s, d) => s + d.stars, 0)}/{recipes.length * 3}</strong></span>
@@ -431,7 +449,7 @@ export default function CookingGame({ game, onProgress, onComplete }) {
               >
                 <span>{recipe.zoneLabel}</span>
               </div>
-              <div className="cook-gauge-needle" style={{ left: `${cursor}%` }} />
+              <div ref={needleRef} className="cook-gauge-needle" style={{ left: `${cursorRef.current}%` }} />
             </div>
             {recipe.technique === 'blend' && (
               <div className="cook-emulsion-row">
@@ -440,9 +458,9 @@ export default function CookingGame({ game, onProgress, onComplete }) {
                 <strong>{emulsionProgress}%</strong>
               </div>
             )}
-            <button type="button" className="game-primary-button cook-action-btn" onClick={triggerCookAction}>
+            <ActionButton type="button" className="game-primary-button cook-action-btn" onAction={triggerCookAction}>
               <Sparkles size={15} /> {recipe.actionButton}
-            </button>
+            </ActionButton>
           </div>
         )}
 

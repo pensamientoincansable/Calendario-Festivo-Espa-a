@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ArrowRight,
   ArrowUpRight,
@@ -9,13 +9,7 @@ import {
   Clock3,
   Gamepad2,
   MapPin,
-  RotateCcw,
   Sparkles,
-  Star,
-  Trophy,
-  Volume2,
-  VolumeX,
-  X,
 } from 'lucide-react';
 import {
   formatLongDate,
@@ -27,22 +21,16 @@ import {
   isoDate,
   REGIONS,
 } from './calendar.js';
-import GameStage from './games/GameStage.jsx';
-import { isSoundMuted, setSoundMuted, sfx } from './sound.js';
+import GameModal from './GameModal.jsx';
+import ThemeToggle from './ThemeToggle.jsx';
+import { useTheme } from './theme.js';
+import { clampStars, loadRecords, saveRecords } from './records.js';
 
 const TODAY = new Date();
 const TODAY_YEAR = TODAY.getFullYear();
 const TODAY_MONTH = TODAY.getMonth();
 const TODAY_ISO = isoDate(TODAY_YEAR, TODAY_MONTH + 1, TODAY.getDate());
 const WEEKDAY_LABELS = ['lun', 'mar', 'mié', 'jue', 'vie', 'sáb', 'dom'];
-const PROGRESS_KEY = 'festeja:records:v2';
-
-function clampStars(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return 0;
-  return Math.max(0, Math.min(3, Math.floor(num)));
-}
-
 const GALLERY_FILTERS = [
   { id: 'all', label: 'Todos' },
   { id: 'race', label: 'Carreras', types: ['race'] },
@@ -51,27 +39,6 @@ const GALLERY_FILTERS = [
   { id: 'navidad-reyes', label: 'Navidad y Reyes', types: ['santa', 'reyes', 'chimes', 'lights'] },
   { id: 'arcade', label: 'Acción y pulso', types: ['runner', 'stacker', 'fireworks', 'catcher', 'breakout', 'candles'] },
 ];
-
-function loadRecords() {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = window.localStorage.getItem(PROGRESS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveRecords(records) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(PROGRESS_KEY, JSON.stringify(records));
-  } catch {
-    // Ignorar si el navegador bloquea almacenamiento
-  }
-}
 
 function capitalize(value = '') {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -102,6 +69,7 @@ function scopePriority(scope) {
 }
 
 function App() {
+  const [theme, chooseTheme] = useTheme();
   const [viewYear, setViewYear] = useState(TODAY_YEAR);
   const [viewMonth, setViewMonth] = useState(TODAY_MONTH);
   const [selectedISO, setSelectedISO] = useState(TODAY_ISO);
@@ -219,7 +187,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="site-header">
+      <header className="site-header" inert={activeGame ? '' : undefined}>
         <a className="brand-lockup" href="#inicio" aria-label="Festeja, ir al inicio">
           <span className="brand-mark"><span /><span /><span /><i /></span>
           <span className="brand-name">festeja<span className="brand-period">.</span></span>
@@ -230,14 +198,17 @@ function App() {
           <a className="nav-link" href="#minijuegos">Minijuegos</a>
           <a className="nav-link" href="#tradiciones">Tradiciones</a>
         </nav>
-        <button className="today-button" type="button" onClick={goToToday}>
-          <CalendarDays size={16} strokeWidth={1.8} />
-          <span>Ir a hoy</span>
-          <ArrowUpRight size={14} strokeWidth={1.8} />
-        </button>
+        <div className="header-actions">
+          <ThemeToggle theme={theme} onChange={chooseTheme} />
+          <button className="today-button" type="button" onClick={goToToday}>
+            <CalendarDays size={16} strokeWidth={1.8} />
+            <span>Ir a hoy</span>
+            <ArrowUpRight size={14} strokeWidth={1.8} />
+          </button>
+        </div>
       </header>
 
-      <main id="inicio">
+      <main id="inicio" inert={activeGame ? '' : undefined}>
         <section className="intro-section" aria-labelledby="intro-title">
           <div className="intro-copy">
             <p className="eyebrow"><span className="eyebrow-spark">✳</span> EL MAPA FESTIVO DE ESPAÑA</p>
@@ -508,6 +479,7 @@ function App() {
                     key={holiday.id}
                     type="button"
                     className={`gallery-card ${rec?.won ? 'is-completed' : ''}`}
+                    data-game-type={holiday.game.type}
                     style={{ '--card-accent': holiday.color }}
                     onClick={() => openHolidayGame(holiday)}
                   >
@@ -542,7 +514,7 @@ function App() {
         </section>
       </main>
 
-      <footer className="site-footer">
+      <footer className="site-footer" inert={activeGame ? '' : undefined}>
         <a className="footer-brand" href="#inicio">festeja<span>.</span></a>
         <p>Un calendario para vivirlo y jugarlo, no solo mirarlo.</p>
         <a href="#calendario">Volver al calendario <ArrowUpRight size={13} /></a>
@@ -551,200 +523,14 @@ function App() {
       {activeGame && (
         <GameModal
           key={activeGame.id}
+          theme={theme}
+          onThemeChange={chooseTheme}
           holiday={activeGame}
           previousRecord={records[activeGame.id]}
           onRecord={recordOutcome}
           onClose={closeGame}
         />
       )}
-    </div>
-  );
-}
-
-function GameModal({ holiday, previousRecord, onRecord, onClose }) {
-  const [result, setResult] = useState(null);
-  const [isNewRecord, setIsNewRecord] = useState(false);
-  const [round, setRound] = useState(0);
-  const [muted, setMuted] = useState(() => isSoundMuted());
-  const modalRef = useRef(null);
-  const game = holiday.game;
-  const meta = GAME_TYPE_META[game.type] ?? { badge: 'ARCADE', goalLabel: 'RETO' };
-
-  useEffect(() => {
-    const previousFocus = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    modalRef.current?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
-    };
-  }, []);
-
-  const baselineBestRef = useRef(
-    Number.isFinite(Number(previousRecord?.bestScore)) ? Number(previousRecord.bestScore) : 0,
-  );
-
-  const handleComplete = useCallback((outcome) => {
-    const score = Number.isFinite(Number(outcome.score)) ? Math.max(0, Math.round(Number(outcome.score))) : 0;
-    const stars = clampStars(outcome.stars);
-    const normalized = { ...outcome, score, stars };
-    const beatRecord = Boolean(normalized.won && score > baselineBestRef.current);
-    if (score > baselineBestRef.current) baselineBestRef.current = score;
-    onRecord(holiday.id, normalized);
-    setIsNewRecord(beatRecord);
-    setResult(normalized);
-  }, [holiday.id, onRecord]);
-
-  function toggleMute() {
-    const next = setSoundMuted(!muted);
-    setMuted(next);
-    if (!next) sfx.tap();
-  }
-
-  function handleModalKeyDown(event) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      onClose();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const focusable = Array.from(
-      event.currentTarget.querySelectorAll('button:not([disabled]), a[href], select:not([disabled]), [tabindex]:not([tabindex="-1"])'),
-    );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-
-  function restart() {
-    setResult(null);
-    setIsNewRecord(false);
-    setRound((value) => value + 1);
-  }
-
-  const scopeText = holiday.scope === 'national'
-    ? 'ESPAÑA · NACIONAL'
-    : holiday.scope === 'popular'
-      ? 'CELEBRACIÓN POPULAR'
-      : holiday.regionLabel.toUpperCase();
-
-  return (
-    <div
-      className="game-backdrop"
-      role="presentation"
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-    >
-      <section
-        ref={modalRef}
-        tabIndex={-1}
-        className="game-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="game-title"
-        onKeyDown={handleModalKeyDown}
-        style={{ '--event-color': holiday.color }}
-      >
-        <div className="game-poster">
-          <div className="game-poster-orbit game-poster-orbit-one" />
-          <div className="game-poster-orbit game-poster-orbit-two" />
-          <div className="game-modal-brand">
-            <span className="brand-mark brand-mark-small"><span /><span /><span /><i /></span>
-            <span>festeja<span className="brand-period">.</span></span>
-          </div>
-          <span className="game-poster-overline">MINIJUEGO · {meta.badge}</span>
-          <div className="game-poster-symbol" aria-hidden="true">{holiday.icon}</div>
-          <div className="game-poster-copy">
-            <span>{formatLongDate(holiday.date)}</span>
-            <h2>{holiday.name}</h2>
-            <p>{holiday.description}</p>
-          </div>
-          <div className="game-poster-foot">
-            <span>{scopeText}</span>
-            <span>{previousRecord?.bestScore ? `RÉCORD ${previousRecord.bestScore}` : meta.goalLabel}</span>
-          </div>
-        </div>
-
-        <div className="game-content">
-          <div className="game-content-topline">
-            <div>
-              <span className="game-content-kicker">MINIJUEGO INTERACTIVO</span>
-              <span className="game-content-time"><Gamepad2 size={13} />{meta.badge}</span>
-            </div>
-            <div className="game-top-actions">
-              <button
-                type="button"
-                className="game-icon-btn"
-                onClick={toggleMute}
-                aria-label={muted ? 'Activar efectos de sonido' : 'Silenciar efectos de sonido'}
-                title={muted ? 'Activar sonido' : 'Silenciar sonido'}
-              >
-                {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-              </button>
-              <button type="button" className="game-close" onClick={onClose} aria-label="Cerrar minijuego">
-                <X size={18} />
-              </button>
-            </div>
-          </div>
-
-          {result ? (
-            <div className="game-result" key="complete">
-              <div className={`result-medal ${result.won ? '' : 'result-medal-retry'}`}>
-                {result.won ? <Trophy size={30} /> : <RotateCcw size={26} />}
-              </div>
-              <div className="result-stars" aria-label={`${result.stars ?? 0} de 3 estrellas`}>
-                {[1, 2, 3].map((n) => (
-                  <Star key={n} size={22} className={n <= (result.stars ?? 0) ? 'star-filled' : 'star-empty'} />
-                ))}
-              </div>
-              <span className="game-content-kicker">
-                {result.won ? (isNewRecord ? '¡VICTORIA Y NUEVO RÉCORD!' : '¡MINIJUEGO SUPERADO!') : '¡CASI LO TIENES!'}
-              </span>
-              <h3 id="game-title">
-                {result.won
-                  ? (result.stars === 3 ? '¡Lo has bordado!' : '¡Gran partida!')
-                  : '¡A por la revancha!'}
-              </h3>
-              <p>{result.summary}</p>
-              <div className="result-score">
-                <strong>{result.score}</strong>
-                <span>{result.unit}</span>
-              </div>
-              <div className="result-actions">
-                <button type="button" className="game-primary-button" onClick={restart}>
-                  <RotateCcw size={14} /> {result.won ? 'Jugar otra vez' : 'Reintentar ahora'}
-                </button>
-                <button type="button" className="game-secondary-button" onClick={onClose}>
-                  Volver al calendario <ArrowUpRight size={14} />
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="game-heading">
-                <span className="game-step-label">{meta.badge} · {holiday.shortName.toUpperCase()}</span>
-                <h3 id="game-title">{game.title}</h3>
-                <p>{game.instruction}</p>
-              </div>
-              <GameStage
-                key={`${holiday.id}-${round}`}
-                game={game}
-                onComplete={handleComplete}
-              />
-            </>
-          )}
-        </div>
-      </section>
     </div>
   );
 }
