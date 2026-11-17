@@ -15,13 +15,13 @@ concurrency:
 jobs:
   checks:
     name: Código, tests y navegador
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Descargar el repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Configurar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -39,7 +39,7 @@ jobs:
         run: npm run test:e2e
       - name: Conservar las trazas si falla una prueba
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: trazas-playwright
           path: .cache/playwright-results
