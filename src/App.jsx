@@ -1,23 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDown,
   ArrowRight,
-  ArrowUp,
   ArrowUpRight,
   CalendarDays,
-  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Gamepad2,
   MapPin,
   RotateCcw,
   Sparkles,
+  Star,
   Trophy,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import {
   formatLongDate,
+  GAME_TYPE_META,
   getDaysBetween,
   getHolidays,
   getMonthCells,
@@ -25,10 +27,51 @@ import {
   isoDate,
   REGIONS,
 } from './calendar.js';
+import GameStage from './games/GameStage.jsx';
+import { isSoundMuted, setSoundMuted, sfx } from './sound.js';
 
 const TODAY = new Date();
-const TODAY_ISO = TODAY.toISOString().slice(0, 10);
+const TODAY_YEAR = TODAY.getFullYear();
+const TODAY_MONTH = TODAY.getMonth();
+const TODAY_ISO = isoDate(TODAY_YEAR, TODAY_MONTH + 1, TODAY.getDate());
 const WEEKDAY_LABELS = ['lun', 'mar', 'mié', 'jue', 'vie', 'sáb', 'dom'];
+const PROGRESS_KEY = 'festeja:records:v2';
+
+function clampStars(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(3, Math.floor(num)));
+}
+
+const GALLERY_FILTERS = [
+  { id: 'all', label: 'Todos' },
+  { id: 'race', label: 'Carreras', types: ['race'] },
+  { id: 'cooking', label: 'Cocina', types: ['cooking'] },
+  { id: 'match3', label: 'Candy Match', types: ['match3'] },
+  { id: 'navidad-reyes', label: 'Navidad y Reyes', types: ['santa', 'reyes', 'chimes', 'lights'] },
+  { id: 'arcade', label: 'Acción y pulso', types: ['runner', 'stacker', 'fireworks', 'catcher', 'breakout', 'candles'] },
+];
+
+function loadRecords() {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(PROGRESS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveRecords(records) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(PROGRESS_KEY, JSON.stringify(records));
+  } catch {
+    // Ignorar si el navegador bloquea almacenamiento
+  }
+}
 
 function capitalize(value = '') {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -46,56 +89,46 @@ function countdownLabel(date) {
   return `Hace ${Math.abs(difference)} ${difference === -1 ? 'día' : 'días'}`;
 }
 
-function gameTypeLabel(type) {
-  if (type === 'memory') return 'memoria';
-  if (type === 'order') return 'orden';
-  return 'trivial';
+function scopeBadgeLabel(holiday) {
+  if (holiday.scope === 'national') return 'FESTIVO NACIONAL';
+  if (holiday.scope === 'popular') return 'CELEBRACIÓN POPULAR';
+  return `AUTONÓMICO · ${holiday.regionLabel.toUpperCase()}`;
 }
 
-function shuffle(items) {
-  const result = [...items];
-  for (let index = result.length - 1; index > 0; index -= 1) {
-    const target = Math.floor(Math.random() * (index + 1));
-    [result[index], result[target]] = [result[target], result[index]];
-  }
-  return result;
-}
-
-function makeDeck(pairs) {
-  return shuffle(pairs.flatMap((pair, pairIndex) => pair.map((card, side) => ({
-    ...card,
-    pairId: pairIndex,
-    id: `${pairIndex}-${side}`,
-  }))));
-}
-
-function shuffleSteps(steps) {
-  const mixed = shuffle(steps);
-  if (mixed.every((step, index) => step.id === steps[index].id) && mixed.length > 1) {
-    return [...mixed.slice(1), mixed[0]];
-  }
-  return mixed;
-}
-
-function useElapsed(active) {
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    if (!active) return undefined;
-    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [active]);
-  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+function scopePriority(scope) {
+  if (scope === 'national') return 0;
+  if (scope === 'regional') return 1;
+  return 2;
 }
 
 function App() {
-  const initialYear = TODAY.getUTCFullYear();
-  const initialMonth = TODAY.getUTCMonth();
-  const [viewYear, setViewYear] = useState(initialYear);
-  const [viewMonth, setViewMonth] = useState(initialMonth);
+  const [viewYear, setViewYear] = useState(TODAY_YEAR);
+  const [viewMonth, setViewMonth] = useState(TODAY_MONTH);
   const [selectedISO, setSelectedISO] = useState(TODAY_ISO);
   const [region, setRegion] = useState('all');
+  const [galleryFilter, setGalleryFilter] = useState('all');
   const [activeGame, setActiveGame] = useState(null);
+  const [records, setRecords] = useState(() => loadRecords());
+
   const closeGame = useCallback(() => setActiveGame(null), []);
+
+  const recordOutcome = useCallback((holidayId, result) => {
+    setRecords((prev) => {
+      const existing = prev[holidayId] ?? { bestScore: 0, stars: 0, won: false };
+      const prevScore = Number.isFinite(Number(existing.bestScore)) ? Number(existing.bestScore) : 0;
+      const nextScore = Number.isFinite(Number(result.score)) ? Math.max(0, Math.round(Number(result.score))) : 0;
+      const updated = {
+        ...prev,
+        [holidayId]: {
+          bestScore: Math.max(prevScore, nextScore),
+          stars: Math.max(clampStars(existing.stars), clampStars(result.stars)),
+          won: Boolean(existing.won) || Boolean(result.won),
+        },
+      };
+      saveRecords(updated);
+      return updated;
+    });
+  }, []);
 
   const yearHolidays = useMemo(() => getHolidays(viewYear, region), [viewYear, region]);
   const allVisibleHolidays = useMemo(() => [
@@ -103,30 +136,43 @@ function App() {
     ...yearHolidays,
     ...getHolidays(viewYear + 1, region),
   ], [viewYear, region, yearHolidays]);
+
   const holidaysByDate = useMemo(() => {
     const map = new Map();
     allVisibleHolidays.forEach((holiday) => {
       const group = map.get(holiday.date) ?? [];
       group.push(holiday);
-      group.sort((a, b) => (a.scope === b.scope ? a.name.localeCompare(b.name) : a.scope === 'national' ? -1 : 1));
+      group.sort((a, b) => (
+        a.scope === b.scope
+          ? a.name.localeCompare(b.name)
+          : scopePriority(a.scope) - scopePriority(b.scope)
+      ));
       map.set(holiday.date, group);
     });
     return map;
   }, [allVisibleHolidays]);
+
   const monthCells = useMemo(() => getMonthCells(viewYear, viewMonth), [viewYear, viewMonth]);
   const monthHolidays = useMemo(
     () => yearHolidays.filter((holiday) => holiday.date.slice(0, 7) === isoDate(viewYear, viewMonth + 1, 1).slice(0, 7)),
     [yearHolidays, viewYear, viewMonth],
   );
 
+  const filteredGallery = useMemo(() => {
+    const filter = GALLERY_FILTERS.find((item) => item.id === galleryFilter);
+    if (!filter || !filter.types) return yearHolidays;
+    return yearHolidays.filter((holiday) => filter.types.includes(holiday.game.type));
+  }, [galleryFilter, yearHolidays]);
+
   const selectedEvents = holidaysByDate.get(selectedISO) ?? [];
   const selectedHoliday = selectedEvents[0] ?? null;
   const upcomingHoliday = allVisibleHolidays.find((holiday) => holiday.date > selectedISO) ?? yearHolidays[0] ?? null;
   const focusHoliday = selectedHoliday ?? upcomingHoliday;
   const focusIsSelected = Boolean(selectedHoliday);
+  const focusMeta = focusHoliday ? (GAME_TYPE_META[focusHoliday.game.type] ?? { badge: 'ARCADE', label: 'Arcade' }) : null;
   const regionLabel = REGIONS.find((item) => item.id === region)?.label ?? 'Toda España';
   const nationalCount = yearHolidays.filter((holiday) => holiday.scope === 'national').length;
-  const regionalCount = yearHolidays.filter((holiday) => holiday.scope === 'regional').length;
+  const completedCount = yearHolidays.filter((holiday) => records[holiday.id]?.won).length;
 
   function openHolidayGame(holiday) {
     setSelectedISO(holiday.date);
@@ -162,8 +208,8 @@ function App() {
   }
 
   function goToToday() {
-    setViewYear(TODAY.getUTCFullYear());
-    setViewMonth(TODAY.getUTCMonth());
+    setViewYear(TODAY_YEAR);
+    setViewMonth(TODAY_MONTH);
     setSelectedISO(TODAY_ISO);
     document.getElementById('calendario')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -181,6 +227,7 @@ function App() {
         </a>
         <nav className="main-nav" aria-label="Navegación principal">
           <a className="nav-link nav-link-active" href="#calendario">Calendario</a>
+          <a className="nav-link" href="#minijuegos">Minijuegos</a>
           <a className="nav-link" href="#tradiciones">Tradiciones</a>
         </nav>
         <button className="today-button" type="button" onClick={goToToday}>
@@ -194,9 +241,14 @@ function App() {
         <section className="intro-section" aria-labelledby="intro-title">
           <div className="intro-copy">
             <p className="eyebrow"><span className="eyebrow-spark">✳</span> EL MAPA FESTIVO DE ESPAÑA</p>
-            <h1 id="intro-title">El año también<br /><em>se celebra.</em></h1>
-            <p className="intro-description">Encuentra los días que nos reúnen. Abre una fecha festiva para descubrir su historia y jugar a su pequeño reto.</p>
-            <a className="intro-link" href="#calendario">Explorar el calendario <ArrowRight size={16} /></a>
+            <h1 id="intro-title">El año también<br /><em>se juega.</em></h1>
+            <p className="intro-description">
+              Explora los festivos y celebraciones de España y abre cada fecha para disfrutar su propio minijuego interactivo: carreras, cocina española, el trineo de Papá Noel, la cabalgata de Reyes, dulces de Halloween y mucho más.
+            </p>
+            <div className="intro-actions">
+              <a className="intro-link" href="#calendario">Explorar el calendario <ArrowRight size={16} /></a>
+              <a className="intro-link intro-link-secondary" href="#minijuegos"><Gamepad2 size={15} /> Ver todos los minijuegos</a>
+            </div>
           </div>
           <div className="intro-art" aria-label="Diecinueve comunidades y ciudades autónomas, un mismo calendario">
             <div className="art-grain" />
@@ -205,7 +257,7 @@ function App() {
             <div className="art-sun-disc"><span className="art-sun-symbol">✳</span><span className="art-sun-dot" /></div>
             <span className="art-star art-star-one">✦</span>
             <span className="art-star art-star-two">✧</span>
-            <span className="art-caption art-caption-top">UN PAÍS · MUCHAS FORMAS DE CELEBRAR</span>
+            <span className="art-caption art-caption-top">UN MINIJUEGO ÚNICO · CADA FESTIVO</span>
             <span className="art-caption art-caption-bottom"><strong>19</strong><span>territorios,<br />un mismo latido.</span></span>
             <span className="art-year-stamp">EDICIÓN<br /><strong>{viewYear}</strong></span>
           </div>
@@ -216,28 +268,41 @@ function App() {
             <div className="section-heading-copy">
               <p className="eyebrow"><span className="eyebrow-dot" /> AGENDA VIVA</p>
               <h2 id="calendar-heading">Busca tu próxima <em>fiesta.</em></h2>
-              <p>Un calendario para mirar, descubrir y celebrar a tu manera.</p>
+              <p>Toca cualquier festivo del calendario para abrir al instante su minijuego interactivo.</p>
             </div>
             <div className="calendar-filters">
               <label className="filter-control territory-filter">
                 <span>TERRITORIO</span>
-                <span className="select-wrap"><MapPin size={15} /><select value={region} onChange={(event) => setRegion(event.target.value)} aria-label="Selecciona una comunidad autónoma">
-                  {REGIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-                </select><ChevronDown size={14} /></span>
+                <span className="select-wrap">
+                  <MapPin size={15} />
+                  <select value={region} onChange={(event) => setRegion(event.target.value)} aria-label="Selecciona una comunidad autónoma">
+                    {REGIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select>
+                  <ChevronDown size={14} />
+                </span>
               </label>
               <label className="filter-control year-filter">
                 <span>AÑO</span>
-                <span className="select-wrap year-select-wrap"><select value={viewYear} onChange={changeYear} aria-label="Selecciona un año">
-                  {yearOptions.map((year) => <option key={year} value={year}>{year}</option>)}
-                </select><ChevronDown size={14} /></span>
+                <span className="select-wrap year-select-wrap">
+                  <select value={viewYear} onChange={changeYear} aria-label="Selecciona un año">
+                    {yearOptions.map((year) => <option key={year} value={year}>{year}</option>)}
+                  </select>
+                  <ChevronDown size={14} />
+                </span>
               </label>
             </div>
           </div>
 
           <div className="scope-note">
             <span className="scope-note-icon"><Sparkles size={13} /></span>
-            <span>{region === 'all' ? 'Vista nacional: muestra los festivos comunes a toda España. Elige un territorio para sumar sus fechas autonómicas.' : `Vista de ${regionLabel}: festivos nacionales y fechas autonómicas de referencia.`}</span>
-            <span className="scope-note-count">{nationalCount + regionalCount} FECHAS</span>
+            <span>
+              {region === 'all'
+                ? 'Vista de toda España: festivos nacionales y grandes celebraciones con minijuego propio. Elige una comunidad para sumar sus minijuegos autonómicos.'
+                : `Vista de ${regionLabel}: festivos nacionales, celebraciones populares y minijuegos autonómicos de este territorio.`}
+            </span>
+            <span className="scope-note-count">
+              {completedCount > 0 ? `${completedCount}/${yearHolidays.length} SUPERADOS` : `${yearHolidays.length} MINIJUEGOS`}
+            </span>
           </div>
 
           <div className="calendar-layout">
@@ -264,6 +329,12 @@ function App() {
                     const event = cellEvents[0];
                     const isToday = cell.iso === TODAY_ISO;
                     const isSelected = cell.iso === selectedISO;
+                    const isBeaten = event && records[event.id]?.won;
+                    const labelClass = event?.scope === 'regional'
+                      ? 'regional-label'
+                      : event?.scope === 'popular'
+                        ? 'popular-label'
+                        : 'national-label';
                     const classes = [
                       'calendar-day',
                       cell.inMonth ? '' : 'day-outside',
@@ -271,7 +342,7 @@ function App() {
                       isSelected ? 'day-selected' : '',
                       event ? 'day-holiday' : '',
                     ].filter(Boolean).join(' ');
-                    const accessibleLabel = `${formatLongDate(cell.iso)}${cellEvents.length ? `. Festivo: ${cellEvents.map((item) => item.name).join(', ')}. Abrir minijuego.` : ''}`;
+                    const accessibleLabel = `${formatLongDate(cell.iso)}${cellEvents.length ? `. Festivo: ${cellEvents.map((item) => item.name).join(', ')}. Jugar ${event.game.title}.` : ''}`;
                     return (
                       <button
                         className={classes}
@@ -280,15 +351,16 @@ function App() {
                         onClick={() => handleCellClick(cell)}
                         aria-label={accessibleLabel}
                         aria-pressed={isSelected}
-                        title={cellEvents.length ? `Abrir reto: ${cellEvents.map((item) => item.name).join(' · ')}` : formatLongDate(cell.iso)}
+                        title={event ? `Jugar: ${event.game.title} (${event.name})` : formatLongDate(cell.iso)}
                       >
                         <span className="day-topline">
                           <span className="day-number">{cell.day}</span>
                           {isToday && <span className="today-marker">HOY</span>}
+                          {!isToday && isBeaten && <span className="day-won-star" aria-hidden="true">★</span>}
                           {cellEvents.length > 1 && <span className="extra-event-count">+{cellEvents.length - 1}</span>}
                         </span>
                         {event ? (
-                          <span className={`day-event-label ${event.scope === 'regional' ? 'regional-label' : 'national-label'}`}>
+                          <span className={`day-event-label ${labelClass}`}>
                             <span className="day-event-dot" />
                             <span className="day-event-text">{event.shortName}</span>
                             <Sparkles size={10} className="day-event-spark" />
@@ -301,17 +373,18 @@ function App() {
                 <div className="calendar-bottomline">
                   <div className="calendar-legend">
                     <span><i className="legend-dot legend-national" />Nacional</span>
+                    <span><i className="legend-dot legend-popular" />Celebración</span>
                     {region !== 'all' && <span><i className="legend-dot legend-regional" />Autonómico</span>}
                     <span><i className="legend-dot legend-today" />Hoy</span>
                   </div>
-                  <span className="month-event-count">{monthHolidays.length} {monthHolidays.length === 1 ? 'fecha festiva' : 'fechas festivas'}</span>
+                  <span className="month-event-count">{monthHolidays.length} {monthHolidays.length === 1 ? 'minijuego este mes' : 'minijuegos este mes'}</span>
                 </div>
               </div>
 
               <div className="month-events">
                 <div className="month-events-heading">
                   <span>EN {monthName.toUpperCase()}</span>
-                  <span>{monthHolidays.length ? 'Toca una fecha para abrir su reto' : 'Un mes para seguir explorando'}</span>
+                  <span>{monthHolidays.length ? 'Toca una fecha para jugar ahora' : 'Explora otro mes o comunidad'}</span>
                 </div>
                 {monthHolidays.length ? (
                   <div className="month-event-list">
@@ -319,13 +392,13 @@ function App() {
                       <button type="button" className="month-event-chip" key={holiday.id} onClick={() => openHolidayGame(holiday)}>
                         <span className="chip-day">{Number(holiday.date.slice(-2))}</span>
                         <span className="chip-event-icon">{holiday.icon}</span>
-                        <span className="chip-name">{holiday.shortName}</span>
+                        <span className="chip-name">{holiday.shortName} · <em>{holiday.game.title}</em></span>
                         <ArrowUpRight size={13} />
                       </button>
                     ))}
                   </div>
                 ) : (
-                  <p className="empty-month-note">Todavía no hay fechas festivas en este mes para {regionLabel}. Cambia de mes o explora otro territorio.</p>
+                  <p className="empty-month-note">No hay fechas señaladas en {monthName} para {regionLabel}. Cambia de mes, elige otra comunidad o baja al salón de minijuegos.</p>
                 )}
               </div>
             </div>
@@ -337,78 +410,197 @@ function App() {
                     <div className="spotlight-orbit spotlight-orbit-a" />
                     <div className="spotlight-orbit spotlight-orbit-b" />
                     <div className="spotlight-topline">
-                      <span>{focusIsSelected ? 'FECHA FESTIVA SELECCIONADA' : 'SIGUIENTE EN EL CALENDARIO'}</span>
-                      <Sparkles size={15} />
+                      <span>{focusIsSelected ? 'FECHA SELECCIONADA' : 'SIGUIENTE EN EL CALENDARIO'}</span>
+                      <Gamepad2 size={15} />
                     </div>
                     <div className="spotlight-date-row">
-                      <div className="spotlight-date"><span>{shortMonth(focusHoliday.date)}</span><strong>{Number(focusHoliday.date.slice(-2))}</strong></div>
+                      <div className="spotlight-date">
+                        <span>{shortMonth(focusHoliday.date)}</span>
+                        <strong>{Number(focusHoliday.date.slice(-2))}</strong>
+                      </div>
                       <div className="spotlight-title-wrap">
-                        <span className="spotlight-scope">{focusHoliday.scope === 'national' ? 'FESTIVO NACIONAL' : `AUTONÓMICO · ${focusHoliday.regionLabel.toUpperCase()}`}</span>
+                        <span className="spotlight-scope">{scopeBadgeLabel(focusHoliday)}</span>
                         <h3>{focusHoliday.name}</h3>
                       </div>
                     </div>
-                    {!focusIsSelected && selectedISO !== TODAY_ISO && <p className="selected-date-context">Después del {formatLongDate(selectedISO)}.</p>}
-                    <p className="spotlight-description">{focusHoliday.description}</p>
+                    {!focusIsSelected && selectedISO !== TODAY_ISO && (
+                      <p className="selected-date-context">Después del {formatLongDate(selectedISO)}.</p>
+                    )}
+                    <p className="spotlight-description">
+                      <strong className="spotlight-game-name">{focusHoliday.icon} {focusHoliday.game.title}:</strong> {focusHoliday.game.instruction}
+                    </p>
                     <div className="spotlight-meta">
                       <span><Clock3 size={13} />{countdownLabel(focusHoliday.date)}</span>
-                      <span className="game-type-pill">RETO DE {gameTypeLabel(focusHoliday.game.type).toUpperCase()}</span>
+                      <span className="game-type-pill">{focusMeta?.badge}</span>
                     </div>
                     <button className="spotlight-game-button" type="button" onClick={() => setActiveGame(focusHoliday)}>
-                      <span><Sparkles size={16} /> Jugar el minijuego</span><ArrowUpRight size={17} />
+                      <span><Sparkles size={16} /> Jugar «{focusHoliday.game.title}»</span>
+                      <ArrowUpRight size={17} />
                     </button>
-                    <span className="spotlight-footer-note">Un reto creado para esta fecha, no para cualquier día.</span>
+                    {selectedEvents.length > 1 && (
+                      <div className="spotlight-extra-games">
+                        {selectedEvents.slice(1).map((alt) => (
+                          <button
+                            key={alt.id}
+                            type="button"
+                            className="spotlight-alt-button"
+                            onClick={() => setActiveGame(alt)}
+                          >
+                            <span>{alt.icon} También hoy: {alt.shortName} · «{alt.game.title}»</span>
+                            <ArrowUpRight size={13} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <span className="spotlight-footer-note">
+                      {records[focusHoliday.id]?.won
+                        ? `Superado · ${'★'.repeat(clampStars(records[focusHoliday.id].stars))} · Récord: ${records[focusHoliday.id].bestScore ?? 0}`
+                        : 'Minijuego interactivo diseñado a medida para esta fecha.'}
+                    </span>
                   </article>
 
                   <article className="tradition-card" id="tradiciones">
-                    <div className="tradition-topline"><span>UNA TRADICIÓN PARA RECORDAR</span><span className="tradition-icon">{focusHoliday.icon}</span></div>
+                    <div className="tradition-topline">
+                      <span>UNA TRADICIÓN PARA RECORDAR</span>
+                      <span className="tradition-icon">{focusHoliday.icon}</span>
+                    </div>
                     <h3>Lo que hace especial<br />este día.</h3>
                     <p>{focusHoliday.tradition}</p>
                     <div className="tradition-source"><span className="tradition-dash" />{focusHoliday.shortName}</div>
                   </article>
                 </>
-              ) : (
-                <div className="spotlight-card spotlight-empty">
-                  <Sparkles size={22} />
-                  <h3>Un año lleno de historias.</h3>
-                  <p>Elige una fecha festiva para descubrir su tradición y jugar a su reto.</p>
-                </div>
-              )}
+              ) : null}
               <div className="side-stat-row">
-                <div><span>EN {viewYear}</span><strong>{nationalCount}<small> nacionales</small></strong></div>
-                <div><span>ESTE MES</span><strong>{monthHolidays.length}<small> {monthHolidays.length === 1 ? 'fecha' : 'fechas'}</small></strong></div>
+                <div><span>FESTIVOS {viewYear}</span><strong>{nationalCount}<small> nacionales</small></strong></div>
+                <div><span>TU COLECCIÓN</span><strong>{completedCount}<small> / {yearHolidays.length} jugados</small></strong></div>
               </div>
             </aside>
           </div>
 
-          <p className="calendar-disclaimer"><span>NOTA</span> Incluye festivos nacionales y fechas autonómicas de referencia. Los festivos trasladados y locales pueden variar: confirma el calendario laboral oficial de tu comunidad y municipio.</p>
+          <section className="arcade-gallery" id="minijuegos" aria-labelledby="gallery-heading">
+            <div className="gallery-header">
+              <div>
+                <p className="eyebrow"><span className="eyebrow-dot" /> SALÓN DE MINIJUEGOS · {regionLabel.toUpperCase()}</p>
+                <h3 id="gallery-heading">Un juego interactivo para <em>cada festivo.</em></h3>
+              </div>
+              <div className="gallery-filters" role="tablist" aria-label="Filtrar minijuegos por estilo">
+                {GALLERY_FILTERS.map((filter) => (
+                  <button
+                    key={filter.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={galleryFilter === filter.id}
+                    className={`gallery-filter-pill ${galleryFilter === filter.id ? 'is-active' : ''}`}
+                    onClick={() => setGalleryFilter(filter.id)}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="gallery-grid">
+              {filteredGallery.map((holiday) => {
+                const meta = GAME_TYPE_META[holiday.game.type] ?? { badge: 'ARCADE' };
+                const rec = records[holiday.id];
+                return (
+                  <button
+                    key={holiday.id}
+                    type="button"
+                    className={`gallery-card ${rec?.won ? 'is-completed' : ''}`}
+                    style={{ '--card-accent': holiday.color }}
+                    onClick={() => openHolidayGame(holiday)}
+                  >
+                    <div className="gallery-card-top">
+                      <span className="gallery-date">{Number(holiday.date.slice(-2))} {shortMonth(holiday.date).toUpperCase()}</span>
+                      <span className="gallery-badge">{meta.badge}</span>
+                    </div>
+                    <div className="gallery-card-main">
+                      <span className="gallery-icon" aria-hidden="true">{holiday.icon}</span>
+                      <div className="gallery-copy">
+                        <span className="gallery-holiday">{holiday.shortName}</span>
+                        <strong>{holiday.game.title}</strong>
+                      </div>
+                    </div>
+                    <div className="gallery-card-foot">
+                      <span className="gallery-stars">
+                        {clampStars(rec?.stars) > 0
+                          ? '★'.repeat(clampStars(rec.stars)) + '☆'.repeat(3 - clampStars(rec.stars))
+                          : 'Jugar ahora'}
+                      </span>
+                      <ArrowUpRight size={14} />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <p className="calendar-disclaimer">
+            <span>NOTA</span> Incluye los festivos nacionales, celebraciones populares destacadas y fechas autonómicas de referencia. Los festivos trasladados y locales pueden variar según el calendario laboral oficial de cada comunidad y municipio.
+          </p>
         </section>
       </main>
 
       <footer className="site-footer">
         <a className="footer-brand" href="#inicio">festeja<span>.</span></a>
-        <p>Un calendario para vivirlo, no solo mirarlo.</p>
+        <p>Un calendario para vivirlo y jugarlo, no solo mirarlo.</p>
         <a href="#calendario">Volver al calendario <ArrowUpRight size={13} /></a>
       </footer>
 
-      {activeGame && <GameModal key={activeGame.id} holiday={activeGame} onClose={closeGame} />}
+      {activeGame && (
+        <GameModal
+          key={activeGame.id}
+          holiday={activeGame}
+          previousRecord={records[activeGame.id]}
+          onRecord={recordOutcome}
+          onClose={closeGame}
+        />
+      )}
     </div>
   );
 }
 
-function GameModal({ holiday, onClose }) {
-  const [completed, setCompleted] = useState(false);
-  const [score, setScore] = useState(0);
+function GameModal({ holiday, previousRecord, onRecord, onClose }) {
+  const [result, setResult] = useState(null);
+  const [isNewRecord, setIsNewRecord] = useState(false);
   const [round, setRound] = useState(0);
-  const closeButtonRef = useRef(null);
+  const [muted, setMuted] = useState(() => isSoundMuted());
+  const modalRef = useRef(null);
   const game = holiday.game;
+  const meta = GAME_TYPE_META[game.type] ?? { badge: 'ARCADE', goalLabel: 'RETO' };
 
   useEffect(() => {
     const previousFocus = document.activeElement;
-    closeButtonRef.current?.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    modalRef.current?.focus();
     return () => {
+      document.body.style.overflow = previousOverflow;
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
     };
   }, []);
+
+  const baselineBestRef = useRef(
+    Number.isFinite(Number(previousRecord?.bestScore)) ? Number(previousRecord.bestScore) : 0,
+  );
+
+  const handleComplete = useCallback((outcome) => {
+    const score = Number.isFinite(Number(outcome.score)) ? Math.max(0, Math.round(Number(outcome.score))) : 0;
+    const stars = clampStars(outcome.stars);
+    const normalized = { ...outcome, score, stars };
+    const beatRecord = Boolean(normalized.won && score > baselineBestRef.current);
+    if (score > baselineBestRef.current) baselineBestRef.current = score;
+    onRecord(holiday.id, normalized);
+    setIsNewRecord(beatRecord);
+    setResult(normalized);
+  }, [holiday.id, onRecord]);
+
+  function toggleMute() {
+    const next = setSoundMuted(!muted);
+    setMuted(next);
+    if (!next) sfx.tap();
+  }
 
   function handleModalKeyDown(event) {
     if (event.key === 'Escape') {
@@ -417,14 +609,16 @@ function GameModal({ holiday, onClose }) {
       return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = Array.from(event.currentTarget.querySelectorAll('button:not([disabled]), a[href], select:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll('button:not([disabled]), a[href], select:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+    );
     if (!focusable.length) {
       event.preventDefault();
       return;
     }
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
@@ -434,242 +628,123 @@ function GameModal({ holiday, onClose }) {
   }
 
   function restart() {
-    setCompleted(false);
-    setScore(0);
+    setResult(null);
+    setIsNewRecord(false);
     setRound((value) => value + 1);
   }
 
-  const typeLabel = game.type === 'memory' ? 'MEMORIA' : game.type === 'order' ? 'ORDEN' : 'TRIVIA';
-  const total = game.type === 'memory' ? game.pairs.length : game.type === 'order' ? 1 : game.questions.length;
+  const scopeText = holiday.scope === 'national'
+    ? 'ESPAÑA · NACIONAL'
+    : holiday.scope === 'popular'
+      ? 'CELEBRACIÓN POPULAR'
+      : holiday.regionLabel.toUpperCase();
 
   return (
-    <div className="game-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="game-modal" role="dialog" aria-modal="true" aria-labelledby="game-title" onKeyDown={handleModalKeyDown} style={{ '--event-color': holiday.color }}>
+    <div
+      className="game-backdrop"
+      role="presentation"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <section
+        ref={modalRef}
+        tabIndex={-1}
+        className="game-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="game-title"
+        onKeyDown={handleModalKeyDown}
+        style={{ '--event-color': holiday.color }}
+      >
         <div className="game-poster">
           <div className="game-poster-orbit game-poster-orbit-one" />
           <div className="game-poster-orbit game-poster-orbit-two" />
-          <div className="game-modal-brand"><span className="brand-mark brand-mark-small"><span /><span /><span /><i /></span><span>festeja<span className="brand-period">.</span></span></div>
-          <span className="game-poster-overline">RETO FESTIVO · {typeLabel}</span>
+          <div className="game-modal-brand">
+            <span className="brand-mark brand-mark-small"><span /><span /><span /><i /></span>
+            <span>festeja<span className="brand-period">.</span></span>
+          </div>
+          <span className="game-poster-overline">MINIJUEGO · {meta.badge}</span>
           <div className="game-poster-symbol" aria-hidden="true">{holiday.icon}</div>
           <div className="game-poster-copy">
             <span>{formatLongDate(holiday.date)}</span>
             <h2>{holiday.name}</h2>
             <p>{holiday.description}</p>
           </div>
-          <div className="game-poster-foot"><span>{holiday.scope === 'national' ? 'ESPAÑA · NACIONAL' : holiday.regionLabel.toUpperCase()}</span><span>{String(total).padStart(2, '0')} {game.type === 'quiz' ? 'PISTAS' : game.type === 'memory' ? 'PAREJAS' : 'MOMENTOS'}</span></div>
+          <div className="game-poster-foot">
+            <span>{scopeText}</span>
+            <span>{previousRecord?.bestScore ? `RÉCORD ${previousRecord.bestScore}` : meta.goalLabel}</span>
+          </div>
         </div>
 
         <div className="game-content">
           <div className="game-content-topline">
-            <div><span className="game-content-kicker">TU PEQUEÑO RETO</span><span className="game-content-time"><Clock3 size={13} />3 MIN</span></div>
-            <button ref={closeButtonRef} type="button" className="game-close" onClick={onClose} aria-label="Cerrar minijuego"><X size={18} /></button>
+            <div>
+              <span className="game-content-kicker">MINIJUEGO INTERACTIVO</span>
+              <span className="game-content-time"><Gamepad2 size={13} />{meta.badge}</span>
+            </div>
+            <div className="game-top-actions">
+              <button
+                type="button"
+                className="game-icon-btn"
+                onClick={toggleMute}
+                aria-label={muted ? 'Activar efectos de sonido' : 'Silenciar efectos de sonido'}
+                title={muted ? 'Activar sonido' : 'Silenciar sonido'}
+              >
+                {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              </button>
+              <button type="button" className="game-close" onClick={onClose} aria-label="Cerrar minijuego">
+                <X size={18} />
+              </button>
+            </div>
           </div>
 
-          {completed ? (
+          {result ? (
             <div className="game-result" key="complete">
-              <div className="result-medal"><Trophy size={30} /></div>
-              <span className="game-content-kicker">RETO COMPLETADO</span>
-              <h3 id="game-title">{score === total ? '¡Lo has bordado!' : '¡Buen recorrido!'}</h3>
-              <p>{score === total ? 'Has resuelto todas las pistas de esta fecha.' : 'Cada juego deja una historia nueva. ¿Te animas a mejorar tu resultado?'}</p>
-              <div className="result-score"><strong>{score}<span> / {total}</span></strong><span>{game.type === 'memory' ? 'parejas reunidas' : game.type === 'order' ? 'secuencia correcta' : 'respuestas acertadas'}</span></div>
+              <div className={`result-medal ${result.won ? '' : 'result-medal-retry'}`}>
+                {result.won ? <Trophy size={30} /> : <RotateCcw size={26} />}
+              </div>
+              <div className="result-stars" aria-label={`${result.stars ?? 0} de 3 estrellas`}>
+                {[1, 2, 3].map((n) => (
+                  <Star key={n} size={22} className={n <= (result.stars ?? 0) ? 'star-filled' : 'star-empty'} />
+                ))}
+              </div>
+              <span className="game-content-kicker">
+                {result.won ? (isNewRecord ? '¡VICTORIA Y NUEVO RÉCORD!' : '¡MINIJUEGO SUPERADO!') : '¡CASI LO TIENES!'}
+              </span>
+              <h3 id="game-title">
+                {result.won
+                  ? (result.stars === 3 ? '¡Lo has bordado!' : '¡Gran partida!')
+                  : '¡A por la revancha!'}
+              </h3>
+              <p>{result.summary}</p>
+              <div className="result-score">
+                <strong>{result.score}</strong>
+                <span>{result.unit}</span>
+              </div>
               <div className="result-actions">
-                <button type="button" className="game-primary-button" onClick={onClose}>Volver al calendario <ArrowUpRight size={16} /></button>
-                <button type="button" className="game-secondary-button" onClick={restart}><RotateCcw size={14} /> Jugar otra vez</button>
+                <button type="button" className="game-primary-button" onClick={restart}>
+                  <RotateCcw size={14} /> {result.won ? 'Jugar otra vez' : 'Reintentar ahora'}
+                </button>
+                <button type="button" className="game-secondary-button" onClick={onClose}>
+                  Volver al calendario <ArrowUpRight size={14} />
+                </button>
               </div>
             </div>
           ) : (
             <>
               <div className="game-heading">
-                <span className="game-step-label">{game.type === 'quiz' ? 'TRIVIA · 03 PISTAS' : `RETO · ${typeLabel}`}</span>
+                <span className="game-step-label">{meta.badge} · {holiday.shortName.toUpperCase()}</span>
                 <h3 id="game-title">{game.title}</h3>
                 <p>{game.instruction}</p>
               </div>
-              {game.type === 'memory' && <MemoryGame key={`${holiday.id}-${round}`} game={game} onProgress={setScore} onComplete={() => { setScore(total); setCompleted(true); }} />}
-              {game.type === 'order' && <OrderGame key={`${holiday.id}-${round}`} game={game} onComplete={() => { setScore(1); setCompleted(true); }} />}
-              {game.type === 'quiz' && <QuizGame key={`${holiday.id}-${round}`} game={game} onProgress={setScore} onComplete={(finalScore) => { setScore(finalScore); setCompleted(true); }} />}
+              <GameStage
+                key={`${holiday.id}-${round}`}
+                game={game}
+                onComplete={handleComplete}
+              />
             </>
           )}
         </div>
       </section>
-    </div>
-  );
-}
-
-function MemoryGame({ game, onProgress, onComplete }) {
-  const [deck, setDeck] = useState(() => makeDeck(game.pairs));
-  const [openCards, setOpenCards] = useState([]);
-  const [matchedPairs, setMatchedPairs] = useState([]);
-  const [moves, setMoves] = useState(0);
-  const timeoutRef = useRef(null);
-  const elapsed = useElapsed(true);
-
-  useEffect(() => () => window.clearTimeout(timeoutRef.current), []);
-
-  function chooseCard(card) {
-    if (openCards.length === 2 || openCards.some((item) => item.id === card.id) || matchedPairs.includes(card.pairId)) return;
-    const nextOpenCards = [...openCards, card];
-    setOpenCards(nextOpenCards);
-    if (nextOpenCards.length < 2) return;
-
-    setMoves((value) => value + 1);
-    if (nextOpenCards[0].pairId === nextOpenCards[1].pairId) {
-      const nextMatches = [...matchedPairs, card.pairId];
-      setMatchedPairs(nextMatches);
-      setOpenCards([]);
-      onProgress(nextMatches.length);
-      if (nextMatches.length === game.pairs.length) onComplete();
-    } else {
-      timeoutRef.current = window.setTimeout(() => setOpenCards([]), 780);
-    }
-  }
-
-  function reset() {
-    window.clearTimeout(timeoutRef.current);
-    setDeck(makeDeck(game.pairs));
-    setOpenCards([]);
-    setMatchedPairs([]);
-    setMoves(0);
-    onProgress(0);
-  }
-
-  return (
-    <div className="memory-game">
-      <div className="game-stats-line"><span>PAREJAS <strong>{matchedPairs.length}/{game.pairs.length}</strong></span><span>MOVIMIENTOS <strong>{moves}</strong></span><span>TIEMPO <strong>{elapsed}</strong></span><button type="button" onClick={reset} aria-label="Reiniciar el juego de memoria"><RotateCcw size={14} /></button></div>
-      <div className="memory-grid">
-        {deck.map((card, index) => {
-          const isFaceUp = openCards.some((item) => item.id === card.id) || matchedPairs.includes(card.pairId);
-          const isMatched = matchedPairs.includes(card.pairId);
-          return (
-            <button
-              key={card.id}
-              type="button"
-              className={`memory-card ${isFaceUp ? 'memory-card-open' : ''} ${isMatched ? 'memory-card-matched' : ''}`}
-              onClick={() => chooseCard(card)}
-              aria-label={isFaceUp ? `${card.label}${isMatched ? ', pareja encontrada' : ''}` : `Carta ${index + 1}, boca abajo`}
-              aria-pressed={isFaceUp}
-              disabled={isMatched}
-            >
-              <span className="memory-card-back">✳</span>
-              <span className="memory-card-front"><span>{card.icon}</span><small>{card.label}</small></span>
-            </button>
-          );
-        })}
-      </div>
-      <p className="game-hint"><span className="hint-sparkle">✦</span> Dos cartas iguales se quedan encendidas. ¿Puedes encontrarlas todas?</p>
-    </div>
-  );
-}
-
-function OrderGame({ game, onComplete }) {
-  const [steps, setSteps] = useState(() => shuffleSteps(game.steps));
-  const [message, setMessage] = useState('');
-  const elapsed = useElapsed(true);
-
-  function moveStep(index, direction) {
-    const destination = index + direction;
-    if (destination < 0 || destination >= steps.length) return;
-    setMessage('');
-    setSteps((current) => {
-      const reordered = [...current];
-      [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
-      return reordered;
-    });
-  }
-
-  function checkOrder() {
-    const isCorrect = steps.every((step, index) => step.id === game.steps[index].id);
-    if (isCorrect) onComplete();
-    else setMessage('Casi. Piensa en cómo empieza y termina esta tradición.');
-  }
-
-  function resetOrder() {
-    setSteps(shuffleSteps(game.steps));
-    setMessage('');
-  }
-
-  return (
-    <div className="order-game">
-      <div className="game-stats-line"><span>SECUENCIA <strong>{steps.length} PASOS</strong></span><span>TIEMPO <strong>{elapsed}</strong></span><button type="button" onClick={resetOrder} aria-label="Mezclar de nuevo la secuencia"><RotateCcw size={14} /></button></div>
-      <ol className="order-list">
-        {steps.map((step, index) => (
-          <li key={step.id} className="order-step">
-            <span className="order-step-number">0{index + 1}</span>
-            <span className="order-step-icon">{step.icon}</span>
-            <span className="order-step-label">{step.label}</span>
-            <span className="order-controls">
-              <button type="button" onClick={() => moveStep(index, -1)} disabled={index === 0} aria-label={`Mover ${step.label} hacia arriba`}><ArrowUp size={14} /></button>
-              <button type="button" onClick={() => moveStep(index, 1)} disabled={index === steps.length - 1} aria-label={`Mover ${step.label} hacia abajo`}><ArrowDown size={14} /></button>
-            </span>
-          </li>
-        ))}
-      </ol>
-      {message && <p className="order-feedback" role="status">{message}</p>}
-      <button type="button" className="game-primary-button check-order-button" onClick={checkOrder}>Comprobar mi orden <Check size={16} /></button>
-      <p className="game-hint"><span className="hint-sparkle">✦</span> Usa las flechas para colocar cada momento en su sitio.</p>
-    </div>
-  );
-}
-
-function QuizGame({ game, onProgress, onComplete }) {
-  const [questionIndex, setQuestionIndex] = useState(0);
-  const [choice, setChoice] = useState(null);
-  const [answered, setAnswered] = useState(false);
-  const [score, setScore] = useState(0);
-  const elapsed = useElapsed(true);
-  const question = game.questions[questionIndex];
-
-  function selectAnswer(index) {
-    if (answered) return;
-    const correct = index === question.answer;
-    setChoice(index);
-    setAnswered(true);
-    if (correct) {
-      const nextScore = score + 1;
-      setScore(nextScore);
-      onProgress(nextScore);
-    }
-  }
-
-  function continueQuiz() {
-    if (questionIndex === game.questions.length - 1) {
-      onComplete(score);
-      return;
-    }
-    setQuestionIndex((value) => value + 1);
-    setChoice(null);
-    setAnswered(false);
-  }
-
-  return (
-    <div className="quiz-game">
-      <div className="game-stats-line"><span>PISTAS <strong>0{questionIndex + 1}/0{game.questions.length}</strong></span><span>ACIERTOS <strong>{score}</strong></span><span>TIEMPO <strong>{elapsed}</strong></span></div>
-      <div className="quiz-progress"><span style={{ width: `${((questionIndex + 1) / game.questions.length) * 100}%` }} /></div>
-      <p className="quiz-question">{question.prompt}</p>
-      <div className="quiz-options">
-        {question.options.map((option, index) => {
-          const isCorrect = index === question.answer;
-          const isWrongChoice = answered && choice === index && !isCorrect;
-          return (
-            <button
-              type="button"
-              key={`${questionIndex}-${option}`}
-              className={`quiz-option ${answered && isCorrect ? 'quiz-option-correct' : ''} ${isWrongChoice ? 'quiz-option-wrong' : ''} ${choice === index ? 'quiz-option-chosen' : ''}`}
-              onClick={() => selectAnswer(index)}
-              disabled={answered}
-            >
-              <span className="quiz-option-letter">{String.fromCharCode(65 + index)}</span><span>{option}</span>
-              {answered && isCorrect && <Check size={15} />}
-            </button>
-          );
-        })}
-      </div>
-      {answered && (
-        <div className={`quiz-feedback ${choice === question.answer ? 'quiz-feedback-correct' : ''}`} role="status">
-          <strong>{choice === question.answer ? '¡Correcto!' : 'La respuesta era otra.'}</strong><span>{question.explanation}</span>
-        </div>
-      )}
-      {answered && <button type="button" className="game-primary-button quiz-next-button" onClick={continueQuiz}>{questionIndex === game.questions.length - 1 ? 'Ver resultado' : 'Siguiente pista'} <ArrowRight size={16} /></button>}
-      {!answered && <p className="game-hint"><span className="hint-sparkle">✦</span> Una pista sobre la fecha, otra sobre el calendario. ¡A por las tres!</p>}
     </div>
   );
 }
